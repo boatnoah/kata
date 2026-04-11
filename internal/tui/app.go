@@ -146,13 +146,36 @@ func (a *App) applyAction(action ActionID) tea.Cmd {
 			a.mode = ModeInsert
 			a.compose.exitVisualIfActive()
 		}
+	case ActionEnterInsertLineStart:
+		if a.activePane == PaneCompose {
+			a.compose.MoveLineStartNonSpace()
+			a.mode = ModeInsert
+			a.compose.exitVisualIfActive()
+		}
+	case ActionEnterAppend:
+		if a.activePane == PaneCompose {
+			a.compose.Append()
+			a.mode = ModeInsert
+			a.compose.exitVisualIfActive()
+		}
+	case ActionEnterAppendLineEnd:
+		if a.activePane == PaneCompose {
+			a.compose.MoveLineEnd()
+			a.compose.Append()
+			a.mode = ModeInsert
+			a.compose.exitVisualIfActive()
+		}
 	case ActionEnterNormal:
 		a.mode = ModeNormal
 		a.compose.exitVisualIfActive()
+		a.history.ExitVisual()
 	case ActionEnterVisual:
 		if a.activePane == PaneCompose {
 			a.mode = ModeVisual
 			a.compose.EnterVisual()
+		} else if a.activePane == PaneHistory {
+			a.mode = ModeVisual
+			a.history.EnterVisual()
 		} else {
 			a.mode = ModeVisual
 		}
@@ -242,6 +265,35 @@ func (a *App) applyAction(action ActionID) tea.Cmd {
 		if a.activePane == PaneHistory {
 			a.history.JumpEnd()
 		}
+	case ActionHistoryLeft:
+		if a.activePane == PaneHistory {
+			a.history.MoveLeft()
+		}
+	case ActionHistoryRight:
+		if a.activePane == PaneHistory {
+			a.history.MoveRight()
+		}
+	case ActionHistoryHalfPageDown:
+		if a.activePane == PaneHistory {
+			a.history.MoveHalfPage(1)
+		}
+	case ActionHistoryHalfPageUp:
+		if a.activePane == PaneHistory {
+			a.history.MoveHalfPage(-1)
+		}
+	case ActionHistoryLineStart:
+		if a.activePane == PaneHistory {
+			a.history.LineStart()
+		}
+	case ActionHistoryLineEnd:
+		if a.activePane == PaneHistory {
+			a.history.LineEnd()
+		}
+	case ActionHistoryYank:
+		if a.activePane == PaneHistory {
+			a.history.YankSelection()
+			a.mode = ModeNormal
+		}
 	}
 
 	// Enforce mode compatibility if we changed panes or modes.
@@ -252,10 +304,6 @@ func (a *App) applyAction(action ActionID) tea.Cmd {
 func (a *App) ensureModeSupported() {
 	if a.activePane == PaneHistory && a.mode == ModeInsert {
 		a.mode = ModeNormal
-	}
-	if a.activePane == PaneHistory && a.mode == ModeVisual {
-		a.mode = ModeNormal
-		a.compose.exitVisualIfActive()
 	}
 }
 

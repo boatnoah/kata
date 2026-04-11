@@ -102,7 +102,7 @@ func TestVisualSelectionDeleteYank(t *testing.T) {
 
 func TestPasteAfterBelowCurrentLine(t *testing.T) {
 	c := newComposeWithBuffer("foo\nbar", 1) // cursor on first line
-	c.yankBuf = []rune("baz")
+	copyToClipboard("baz")
 	c.PasteAfter()
 	if string(c.buf) != "foo\nbaz\nbar" {
 		t.Fatalf("paste after expected below current line, got %q", string(c.buf))
@@ -111,7 +111,7 @@ func TestPasteAfterBelowCurrentLine(t *testing.T) {
 
 func TestPasteBeforeAboveCurrentLine(t *testing.T) {
 	c := newComposeWithBuffer("foo\nbar", 5) // cursor on second line
-	c.yankBuf = []rune("baz")
+	copyToClipboard("baz")
 	c.PasteBefore()
 	if string(c.buf) != "foo\nbaz\nbar" {
 		t.Fatalf("paste before expected above current line, got %q", string(c.buf))
@@ -177,5 +177,53 @@ func TestVisualEscapeAndMovement(t *testing.T) {
 	}
 	if app.compose.visualActive {
 		t.Fatalf("visual state should be cleared after esc")
+	}
+}
+
+func TestInsertLineStartWithCapitalI(t *testing.T) {
+	app := NewApp()
+	app.activePane = PaneCompose
+	app.mode = ModeNormal
+	app.compose.buf = []rune("  abc")
+	app.compose.cursor = len(app.compose.buf)
+
+	app.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'I'}})
+	if app.mode != ModeInsert {
+		t.Fatalf("expected insert mode after I, got %v", app.mode)
+	}
+	if app.compose.cursor != 2 {
+		t.Fatalf("expected cursor at first non-space (2), got %v", app.compose.cursor)
+	}
+}
+
+func TestAppendWithA(t *testing.T) {
+	app := NewApp()
+	app.activePane = PaneCompose
+	app.mode = ModeNormal
+	app.compose.buf = []rune("abc")
+	app.compose.cursor = 1 // on 'b'
+
+	app.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if app.mode != ModeInsert {
+		t.Fatalf("expected insert mode after a, got %v", app.mode)
+	}
+	if app.compose.cursor != 2 {
+		t.Fatalf("expected cursor move one right (2), got %v", app.compose.cursor)
+	}
+}
+
+func TestAppendLineEndWithCapitalA(t *testing.T) {
+	app := NewApp()
+	app.activePane = PaneCompose
+	app.mode = ModeNormal
+	app.compose.buf = []rune("abc")
+	app.compose.cursor = 1
+
+	app.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'A'}})
+	if app.mode != ModeInsert {
+		t.Fatalf("expected insert mode after A, got %v", app.mode)
+	}
+	if app.compose.cursor != len([]rune("abc")) {
+		t.Fatalf("expected cursor at line end, got %v", app.compose.cursor)
 	}
 }

@@ -179,6 +179,7 @@ func (c *Compose) DeleteCurrentLine() {
 		return
 	}
 	c.yankBuf = append([]rune(nil), c.buf[start:end]...)
+	copyToClipboard(string(c.yankBuf))
 	c.buf = append(c.buf[:start], c.buf[end:]...)
 	if start > len(c.buf) {
 		start = len(c.buf)
@@ -186,6 +187,16 @@ func (c *Compose) DeleteCurrentLine() {
 	c.cursor = start
 	c.col = c.cursorColumn()
 	c.clearVisual()
+}
+
+func (c *Compose) pasteContent() []rune {
+	if s := pasteFromClipboard(); s != "" {
+		return []rune(s)
+	}
+	if len(c.yankBuf) > 0 {
+		return append([]rune(nil), c.yankBuf...)
+	}
+	return nil
 }
 
 func (c *Compose) MoveUp() {
@@ -258,6 +269,7 @@ func (c *Compose) DeleteSelection() {
 		hi = len(c.buf)
 	}
 	c.yankBuf = append([]rune(nil), c.buf[lo:hi]...)
+	copyToClipboard(string(c.yankBuf))
 	c.buf = append(c.buf[:lo], c.buf[hi:]...)
 	if lo > len(c.buf) {
 		lo = len(c.buf)
@@ -280,11 +292,13 @@ func (c *Compose) YankSelection() {
 		hi = len(c.buf)
 	}
 	c.yankBuf = append([]rune(nil), c.buf[lo:hi]...)
+	copyToClipboard(string(c.yankBuf))
 	c.clearVisual()
 }
 
 func (c *Compose) PasteAfter() {
-	if len(c.yankBuf) == 0 {
+	content := c.pasteContent()
+	if len(content) == 0 {
 		c.clearVisual()
 		return
 	}
@@ -297,7 +311,7 @@ func (c *Compose) PasteAfter() {
 	}
 	end := c.lineEndAt(anchorPos)
 	insertAt = end
-	paste := append([]rune(nil), c.yankBuf...)
+	paste := append([]rune(nil), content...)
 	paste = ensureTrailingNewline(paste)
 	if end < len(c.buf) && c.buf[end] == '\n' {
 		insertAt = end + 1
@@ -310,7 +324,8 @@ func (c *Compose) PasteAfter() {
 }
 
 func (c *Compose) PasteBefore() {
-	if len(c.yankBuf) == 0 {
+	content := c.pasteContent()
+	if len(content) == 0 {
 		c.clearVisual()
 		return
 	}
@@ -322,13 +337,21 @@ func (c *Compose) PasteBefore() {
 		c.clearVisual()
 	}
 	insertAt = c.lineStartAt(anchorPos)
-	paste := append([]rune(nil), c.yankBuf...)
+	paste := append([]rune(nil), content...)
 	paste = ensureTrailingNewline(paste)
 	if insertAt > 0 && c.buf[insertAt-1] != '\n' {
 		paste = append([]rune{'\n'}, paste...)
 	}
 	c.buf = append(c.buf[:insertAt], append(paste, c.buf[insertAt:]...)...)
 	c.cursor = insertAt + len(paste)
+	c.col = c.cursorColumn()
+}
+
+// Append enters insert after the current cursor position (vim 'a').
+func (c *Compose) Append() {
+	if c.cursor < len(c.buf) {
+		c.cursor++
+	}
 	c.col = c.cursorColumn()
 }
 
