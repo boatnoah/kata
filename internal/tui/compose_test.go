@@ -71,6 +71,7 @@ func TestBindingsUseComposeVerticalMoves(t *testing.T) {
 
 func TestCursorVisibleOnEmptyLine(t *testing.T) {
 	c := newComposeWithBuffer("one\n\nthree", 4) // cursor on empty line (at newline rune)
+	c.active = true
 	view := c.renderWithCursor()
 	if !strings.Contains(view, "\x1b[7m ") && !strings.Contains(view, "[ ]") {
 		t.Fatalf("expected block cursor placeholder on empty line, got %q", view)
@@ -225,5 +226,45 @@ func TestAppendLineEndWithCapitalA(t *testing.T) {
 	}
 	if app.compose.cursor != len([]rune("abc")) {
 		t.Fatalf("expected cursor at line end, got %v", app.compose.cursor)
+	}
+}
+
+func TestOpenBelowWithLowercaseO(t *testing.T) {
+	app := NewApp()
+	app.activePane = PaneCompose
+	app.mode = ModeNormal
+	app.compose.buf = []rune("foo\nbar")
+	app.compose.cursor = 1 // on first line
+
+	app.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})
+
+	if app.mode != ModeInsert {
+		t.Fatalf("expected insert mode after o, got %v", app.mode)
+	}
+	if got := string(app.compose.buf); got != "foo\n\nbar" {
+		t.Fatalf("expected blank line inserted below, got %q", got)
+	}
+	if app.compose.cursor != 4 {
+		t.Fatalf("expected cursor at start of new line (4), got %v", app.compose.cursor)
+	}
+}
+
+func TestOpenAboveWithCapitalO(t *testing.T) {
+	app := NewApp()
+	app.activePane = PaneCompose
+	app.mode = ModeNormal
+	app.compose.buf = []rune("foo\nbar")
+	app.compose.cursor = 5 // on second line
+
+	app.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'O'}})
+
+	if app.mode != ModeInsert {
+		t.Fatalf("expected insert mode after O, got %v", app.mode)
+	}
+	if got := string(app.compose.buf); got != "foo\n\nbar" {
+		t.Fatalf("expected blank line inserted above current line, got %q", got)
+	}
+	if app.compose.cursor != 4 {
+		t.Fatalf("expected cursor at start of new line (4), got %v", app.compose.cursor)
 	}
 }

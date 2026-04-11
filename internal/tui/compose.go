@@ -16,10 +16,15 @@ type Compose struct {
 	visualActive bool
 	visualAnchor int
 	yankBuf      []rune
+	active       bool
 }
 
 func NewCompose() *Compose {
 	return &Compose{col: -1}
+}
+
+func (c *Compose) SetActive(active bool) {
+	c.active = active
 }
 
 func (c *Compose) OnWindowSize(width, height int) {
@@ -355,13 +360,108 @@ func (c *Compose) Append() {
 	c.col = c.cursorColumn()
 }
 
+// OpenBelow inserts a new blank line below the current line and moves into it.
+func (c *Compose) OpenBelow() {
+	end := c.lineEndAt(c.cursor)
+	insertAt := end
+	if insertAt < len(c.buf) && c.buf[insertAt] == '\n' {
+		insertAt++
+	}
+	newline := []rune{'\n'}
+	c.buf = append(c.buf[:insertAt], append(newline, c.buf[insertAt:]...)...)
+	c.cursor = insertAt
+	c.col = 0
+	c.clearVisual()
+}
+
+// OpenAbove inserts a new blank line above the current line and moves into it.
+func (c *Compose) OpenAbove() {
+	insertAt := c.lineStartAt(c.cursor)
+	newline := []rune{'\n'}
+	c.buf = append(c.buf[:insertAt], append(newline, c.buf[insertAt:]...)...)
+	c.cursor = insertAt
+	c.col = 0
+	c.clearVisual()
+}
+
 // View renders the compose buffer with a visible cursor.
+// targetLines limits the total rendered height (including the border). Pass 0 for no limit.
 // It returns the rendered string and its line count.
-func (c *Compose) View(width int) (string, int) {
+func (c *Compose) View(width int, targetLines int) (string, int) {
 	content := c.renderWithCursor()
-	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Width(width).Render(content)
+
+	// Cap the number of rendered lines (including the header) before adding the border.
+	// Account for the border's top and bottom lines so the final height stays within targetLines.
+	if targetLines > 0 {
+		available := targetLines - 2 // border adds two lines
+		if available < 1 {
+			available = 1
+		}
+		lines := strings.Split(content, "\n")
+		if len(lines) > available {
+			// Keep the header (line 0) and scroll the body to keep the cursor visible.
+			cursorLine := c.cursorRenderLine()
+			body := lines[1:]
+			bodyCursorLine := cursorLine - 1
+			if bodyCursorLine < 0 {
+				bodyCursorLine = 0
+			}
+
+			window := available - 1 // leave room for header
+			if window < 1 {
+				window = 1
+			}
+
+			start := bodyCursorLine - (window - 1)
+			if start < 0 {
+				start = 0
+			}
+			end := start + window
+			if end > len(body) {
+				end = len(body)
+				start = end - window
+				if start < 0 {
+					start = 0
+				}
+			}
+			body = body[start:end]
+			lines = append([]string{lines[0]}, body...)
+		}
+		content = strings.Join(lines, "\n")
+	}
+
+	borderColor := lipgloss.Color("#666666")
+	if c.active {
+		borderColor = lipgloss.Color("#4ea4ff")
+	}
+
+	style := lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(borderColor)
+	if width > 0 {
+		inner := width - 2 // account for left/right border runes
+		if inner < 1 {
+			inner = 1
+		}
+		style = style.Width(inner)
+	}
+	if targetLines > 0 {
+		contentHeight := targetLines - 2 // exclude border lines
+		if contentHeight < 1 {
+			contentHeight = 1
+		}
+		style = style.Height(contentHeight)
+	}
+
+	box := style.Render(content)
 	lines := strings.Count(box, "\n") + 1
 	return box, lines
+}
+
+// cursorRenderLine returns the zero-based line index (within the unbordered render)
+// where the cursor is placed, accounting for the header line.
+func (c *Compose) cursorRenderLine() int {
+	lineIdx, _ := c.lineAndColumn()
+	// Add one for the header line in renderWithCursor.
+	return lineIdx + 1
 }
 
 func (c *Compose) renderWithCursor() string {
@@ -370,7 +470,7 @@ func (c *Compose) renderWithCursor() string {
 	lo, hi, hasSel := c.selectionRange()
 	for i, r := range c.buf {
 		inSel := hasSel && i >= lo && i < hi
-		if i == c.cursor {
+		if i == c.cursor && c.active {
 			if r == '\n' {
 				cursor := box.wrap(" ")
 				if inSel {
@@ -394,11 +494,16 @@ func (c *Compose) renderWithCursor() string {
 		b.WriteRune(r)
 	}
 	if c.cursor == len(c.buf) {
-		cursor := box.wrap(" ")
+		cursor := ""
+		if c.active {
+			cursor = box.wrap(" ")
+		}
 		if hasSel && c.cursor >= lo && c.cursor < hi {
 			cursor = selectionBox().wrap(cursor)
 		}
-		b.WriteString(cursor)
+		if cursor != "" {
+			b.WriteString(cursor)
+		}
 	}
 	return "Compose\n" + b.String()
 }

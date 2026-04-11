@@ -14,6 +14,7 @@ type HistoryScreen struct {
 	visualActive bool
 	visualAnchor int
 	yankBuf      []string
+	active       bool
 	width        int
 	height       int
 }
@@ -32,6 +33,10 @@ func NewHistoryScreen() *HistoryScreen {
 func (h *HistoryScreen) OnWindowSize(width, height int) {
 	h.width = width
 	h.height = height
+}
+
+func (h *HistoryScreen) SetActive(active bool) {
+	h.active = active
 }
 
 // Move shifts the cursor by delta, clamped to available messages.
@@ -174,7 +179,7 @@ func (h *HistoryScreen) View() string {
 
 		content := line
 		runes := []rune(line)
-		if i == h.cursor {
+		if i == h.cursor && h.active {
 			var sb strings.Builder
 			for idx, r := range runes {
 				if idx == h.cursorCol {
@@ -196,14 +201,14 @@ func (h *HistoryScreen) View() string {
 		fmt.Fprintf(&b, "%s%s\n", marker, content)
 	}
 
+	content := lipgloss.NewStyle().Bold(true).Padding(0, 1).Render(b.String())
+	style := lipgloss.NewStyle()
 	if h.width > 0 {
-		fmt.Fprintf(&b, "\n%vx%v\n", h.width, h.height)
+		style = style.Width(h.width)
 	}
-
-	content := b.String()
-	if h.width == 0 || h.height == 0 {
-		return content
+	if h.height > 0 {
+		style = style.Height(h.height)
 	}
-
-	return lipgloss.Place(h.width, h.height, lipgloss.Center, lipgloss.Center, content)
+	style = style.Align(lipgloss.Left).AlignVertical(lipgloss.Top)
+	return style.Render(content)
 }

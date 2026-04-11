@@ -165,6 +165,18 @@ func (a *App) applyAction(action ActionID) tea.Cmd {
 			a.mode = ModeInsert
 			a.compose.exitVisualIfActive()
 		}
+	case ActionEnterOpenBelow:
+		if a.activePane == PaneCompose {
+			a.compose.OpenBelow()
+			a.mode = ModeInsert
+			a.compose.exitVisualIfActive()
+		}
+	case ActionEnterOpenAbove:
+		if a.activePane == PaneCompose {
+			a.compose.OpenAbove()
+			a.mode = ModeInsert
+			a.compose.exitVisualIfActive()
+		}
 	case ActionEnterNormal:
 		a.mode = ModeNormal
 		a.compose.exitVisualIfActive()
@@ -382,7 +394,21 @@ func (a *App) handleComposeInsertKey(msg tea.KeyMsg) bool {
 
 func (a *App) View() string {
 	status := a.statusLine()
-	composeView, composeLines := a.compose.View(a.width)
+	a.compose.SetActive(a.activePane == PaneCompose)
+	// Keep compose compact (Claude/Opencode-like): target 5 lines including border.
+	composeHeight := 5
+	if a.height > 0 {
+		// Leave room for status line and at least one history line.
+		maxAllowed := a.height - 2
+		if maxAllowed < 3 {
+			maxAllowed = 3
+		}
+		if composeHeight > maxAllowed {
+			composeHeight = maxAllowed
+		}
+	}
+
+	composeView, composeLines := a.compose.View(a.width, composeHeight)
 
 	commandView := ""
 	commandLines := 0
@@ -395,13 +421,44 @@ func (a *App) View() string {
 
 	a.history.width = a.width
 	a.history.height = historyHeight
+	a.history.SetActive(a.activePane == PaneHistory)
 	historyView := a.history.View()
+
+	historyView = padToWidth(historyView, a.width)
+	composeView = padToWidth(composeView, a.width)
+	status = padToWidth(status, a.width)
+
+	if commandView != "" {
+		commandView = padToWidth(commandView, a.width)
+	}
 
 	parts := []string{historyView, composeView, status}
 	if commandView != "" {
 		parts = append(parts, commandView)
 	}
-	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+	frame := lipgloss.JoinVertical(lipgloss.Left, parts...)
+	lines := strings.Count(frame, "\n") + 1
+	if a.height > 0 && lines < a.height {
+		padding := strings.Repeat("\n", a.height-lines)
+		frame += padding
+	}
+	return frame
+}
+
+// padToWidth ensures every line is space-padded to the given width so that
+// shorter lines fully overwrite previous frames in the terminal.
+func padToWidth(s string, width int) string {
+	if width <= 0 {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	for i, ln := range lines {
+		w := lipgloss.Width(ln)
+		if w < width {
+			lines[i] = ln + strings.Repeat(" ", width-w)
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (a *App) statusLine() string {

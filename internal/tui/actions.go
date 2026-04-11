@@ -11,6 +11,8 @@ const (
 	ActionEnterInsertLineStart
 	ActionEnterAppend
 	ActionEnterAppendLineEnd
+	ActionEnterOpenBelow
+	ActionEnterOpenAbove
 	ActionEnterNormal
 	ActionEnterVisual
 	ActionEnterCommandLine
@@ -87,6 +89,8 @@ func defaultBindings() []Binding {
 		{Pane: PaneCompose, Mode: ModeNormal, Key: KeyStroke{Type: tea.KeyRunes, Runes: "I"}, Action: ActionEnterInsertLineStart},
 		{Pane: PaneCompose, Mode: ModeNormal, Key: KeyStroke{Type: tea.KeyRunes, Runes: "a"}, Action: ActionEnterAppend},
 		{Pane: PaneCompose, Mode: ModeNormal, Key: KeyStroke{Type: tea.KeyRunes, Runes: "A"}, Action: ActionEnterAppendLineEnd},
+		{Pane: PaneCompose, Mode: ModeNormal, Key: KeyStroke{Type: tea.KeyRunes, Runes: "o"}, Action: ActionEnterOpenBelow},
+		{Pane: PaneCompose, Mode: ModeNormal, Key: KeyStroke{Type: tea.KeyRunes, Runes: "O"}, Action: ActionEnterOpenAbove},
 		{Pane: PaneCompose, Mode: ModeNormal, Key: KeyStroke{Type: tea.KeyRunes, Runes: "v"}, Action: ActionEnterVisual},
 		{Pane: PaneCompose, Mode: ModeNormal, Key: KeyStroke{Type: tea.KeyEsc}, Action: ActionEnterNormal},
 		{Pane: PaneCompose, Mode: ModeNormal, Key: KeyStroke{Type: tea.KeyRunes, Runes: "h"}, Action: ActionMoveLeft},
