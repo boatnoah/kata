@@ -10,11 +10,14 @@ import (
 // App is the root Bubble Tea model.
 type App struct {
 	mode          Mode
+	prevMode      Mode
 	activePane    Pane
 	history       *HistoryScreen
 	compose       *Compose
+	command       *CommandLine
 	bindings      []Binding
 	leaderPending bool
+	deletePending bool
 	width         int
 	height        int
 }
@@ -23,9 +26,11 @@ type App struct {
 func NewApp() *App {
 	return &App{
 		mode:       ModeNormal,
-		activePane: PaneHistory,
+		prevMode:   ModeNormal,
+		activePane: PaneCompose,
 		history:    NewHistoryScreen(),
 		compose:    NewCompose(),
+		command:    NewCommandLine(),
 		bindings:   defaultBindings(),
 	}
 }
@@ -52,6 +57,35 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (a *App) handleKey(msg tea.KeyMsg) tea.Cmd {
+	// Handle pending delete (for dd in compose normal mode).
+	if a.activePane == PaneCompose && a.mode == ModeNormal && a.deletePending {
+		a.deletePending = false
+		if msg.Type == tea.KeyRunes && string(msg.Runes) == "d" {
+			a.compose.DeleteCurrentLine()
+			return nil
+		}
+		// fallthrough to normal handling
+	}
+
+	if a.activePane == PaneCompose && a.mode == ModeNormal {
+		if msg.Type == tea.KeyRunes && string(msg.Runes) == "d" {
+			a.deletePending = true
+			return nil
+		}
+	}
+	// Command-line mode bypasses other bindings and leader logic.
+	if a.mode == ModeCommandLine {
+		execute, cancel, input := a.command.HandleKey(msg)
+		if cancel {
+			a.exitCommandLine()
+			return nil
+		}
+		if execute {
+			return a.runCommand(input)
+		}
+		return nil
+	}
+
 	// If a leader key was pressed previously, interpret this key using leader bindings.
 	if a.leaderPending {
 		a.leaderPending = false
@@ -110,11 +144,48 @@ func (a *App) applyAction(action ActionID) tea.Cmd {
 	case ActionEnterInsert:
 		if a.activePane == PaneCompose {
 			a.mode = ModeInsert
+			a.compose.exitVisualIfActive()
 		}
 	case ActionEnterNormal:
 		a.mode = ModeNormal
+		a.compose.exitVisualIfActive()
 	case ActionEnterVisual:
-		a.mode = ModeVisual
+		if a.activePane == PaneCompose {
+			a.mode = ModeVisual
+			a.compose.EnterVisual()
+		} else {
+			a.mode = ModeVisual
+		}
+	case ActionEnterCommandLine:
+		a.enterCommandLine()
+	case ActionMoveUpCompose:
+		if a.activePane == PaneCompose {
+			a.compose.MoveUp()
+		}
+	case ActionMoveDownCompose:
+		if a.activePane == PaneCompose {
+			a.compose.MoveDown()
+		}
+	case ActionDeleteSelection:
+		if a.activePane == PaneCompose {
+			a.compose.DeleteSelection()
+			a.mode = ModeNormal
+		}
+	case ActionYankSelection:
+		if a.activePane == PaneCompose {
+			a.compose.YankSelection()
+			a.mode = ModeNormal
+		}
+	case ActionPasteAfter:
+		if a.activePane == PaneCompose {
+			a.compose.PasteAfter()
+			a.mode = ModeNormal
+		}
+	case ActionPasteBefore:
+		if a.activePane == PaneCompose {
+			a.compose.PasteBefore()
+			a.mode = ModeNormal
+		}
 	case ActionMoveLeft:
 		if a.activePane == PaneCompose {
 			a.compose.MoveLeft()
@@ -151,6 +222,10 @@ func (a *App) applyAction(action ActionID) tea.Cmd {
 		if a.activePane == PaneCompose {
 			a.compose.DeleteToEOL()
 		}
+	case ActionDeleteLine:
+		if a.activePane == PaneCompose {
+			a.compose.DeleteCurrentLine()
+		}
 	case ActionMoveUp:
 		if a.activePane == PaneHistory {
 			a.history.Move(-1)
@@ -177,6 +252,44 @@ func (a *App) applyAction(action ActionID) tea.Cmd {
 func (a *App) ensureModeSupported() {
 	if a.activePane == PaneHistory && a.mode == ModeInsert {
 		a.mode = ModeNormal
+	}
+	if a.activePane == PaneHistory && a.mode == ModeVisual {
+		a.mode = ModeNormal
+		a.compose.exitVisualIfActive()
+	}
+}
+
+func (a *App) enterCommandLine() {
+	a.prevMode = a.mode
+	a.mode = ModeCommandLine
+	a.leaderPending = false
+	a.command.Reset()
+	a.compose.exitVisualIfActive()
+}
+
+func (a *App) exitCommandLine() {
+	a.mode = a.prevMode
+	a.command.Reset()
+}
+
+func (a *App) runCommand(input string) tea.Cmd {
+	trimmed := strings.TrimSpace(input)
+	if trimmed == "" {
+		a.exitCommandLine()
+		return nil
+	}
+
+	fields := strings.Fields(trimmed)
+	name := strings.ToLower(fields[0])
+	switch name {
+	case "q", "quit":
+		a.exitCommandLine()
+		return tea.Quit
+	default:
+		// Unknown command: exit command mode quietly.
+		a.exitCommandLine()
+		_ = fields
+		return nil
 	}
 }
 
@@ -223,13 +336,24 @@ func (a *App) View() string {
 	status := a.statusLine()
 	composeView, composeLines := a.compose.View(a.width)
 
-	historyHeight := max(a.height-composeLines-1, 1)
+	commandView := ""
+	commandLines := 0
+	if a.mode == ModeCommandLine {
+		commandView = a.command.View()
+		commandLines = strings.Count(commandView, "\n") + 1
+	}
+
+	historyHeight := max(a.height-composeLines-1-commandLines, 1)
 
 	a.history.width = a.width
 	a.history.height = historyHeight
 	historyView := a.history.View()
 
-	return lipgloss.JoinVertical(lipgloss.Left, historyView, composeView, status)
+	parts := []string{historyView, composeView, status}
+	if commandView != "" {
+		parts = append(parts, commandView)
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
 func (a *App) statusLine() string {
