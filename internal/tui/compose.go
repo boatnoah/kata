@@ -23,6 +23,19 @@ func NewCompose() *Compose {
 	return &Compose{col: -1}
 }
 
+// Content returns the current compose buffer as a string.
+func (c *Compose) Content() string {
+	return string(c.buf)
+}
+
+// Reset clears the compose buffer and cursor state.
+func (c *Compose) Reset() {
+	c.buf = c.buf[:0]
+	c.cursor = 0
+	c.col = -1
+	c.clearVisual()
+}
+
 func (c *Compose) SetActive(active bool) {
 	c.active = active
 }

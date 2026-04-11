@@ -21,12 +21,7 @@ type HistoryScreen struct {
 
 func NewHistoryScreen() *HistoryScreen {
 	return &HistoryScreen{
-		messages: []string{
-			"User: How do I set up project X?",
-			"AI: You can start by running `kata init` in the repo.",
-			"User: Thanks! How do I add tests?",
-			"AI: Run `go test ./...` after adding files under internal/...",
-		},
+		messages: []string{},
 	}
 }
 
@@ -37,6 +32,46 @@ func (h *HistoryScreen) OnWindowSize(width, height int) {
 
 func (h *HistoryScreen) SetActive(active bool) {
 	h.active = active
+}
+
+// AppendMessage adds a new entry to history and focuses the end.
+// It returns the index of the appended message.
+func (h *HistoryScreen) AppendMessage(msg string) int {
+	return h.AppendMessageWithFocus(msg, true)
+}
+
+func (h *HistoryScreen) AppendMessageWithFocus(msg string, focus bool) int {
+	msg = sanitizeHistoryMessage(msg)
+	if msg == "" {
+		return len(h.messages) - 1
+	}
+	h.messages = append(h.messages, msg)
+	if focus || len(h.messages) == 1 {
+		h.cursor = len(h.messages) - 1
+		h.cursorCol = len([]rune(msg))
+	}
+	h.ExitVisual()
+	h.clampCursorCol()
+	return h.cursor
+}
+
+// UpdateMessageAt replaces the message at index and moves the cursor to it.
+func (h *HistoryScreen) UpdateMessageAt(index int, msg string) {
+	h.UpdateMessageAtWithFocus(index, msg, true)
+}
+
+func (h *HistoryScreen) UpdateMessageAtWithFocus(index int, msg string, focus bool) {
+	if index < 0 || index >= len(h.messages) {
+		return
+	}
+	msg = sanitizeHistoryMessage(msg)
+	h.messages[index] = msg
+	if focus {
+		h.cursor = index
+		h.cursorCol = len([]rune(msg))
+	}
+	h.ExitVisual()
+	h.clampCursorCol()
 }
 
 // Move shifts the cursor by delta, clamped to available messages.
@@ -170,16 +205,16 @@ func (h *HistoryScreen) clampCursorCol() {
 
 func (h *HistoryScreen) View() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "History (items: %v)\n", len(h.messages))
 	for i, line := range h.messages {
 		marker := "  "
 		if i == h.cursor {
 			marker = "> "
 		}
 
-		content := line
-		runes := []rune(line)
-		if i == h.cursor && h.active {
+		entry := h.formatEntry(line)
+		content := entry.content
+		runes := []rune(entry.raw)
+		if i == h.cursor && h.active && !entry.styled {
 			var sb strings.Builder
 			for idx, r := range runes {
 				if idx == h.cursorCol {
@@ -198,7 +233,7 @@ func (h *HistoryScreen) View() string {
 			content = selectionBox().wrap(content)
 		}
 
-		fmt.Fprintf(&b, "%s%s\n", marker, content)
+		renderMultilineEntry(&b, marker, content)
 	}
 
 	content := lipgloss.NewStyle().Bold(true).Padding(0, 1).Render(b.String())
@@ -211,4 +246,54 @@ func (h *HistoryScreen) View() string {
 	}
 	style = style.Align(lipgloss.Left).AlignVertical(lipgloss.Top)
 	return style.Render(content)
+}
+
+type historyEntry struct {
+	raw     string
+	content string
+	styled  bool
+}
+
+func (h *HistoryScreen) formatEntry(line string) historyEntry {
+	const userPrefix = "User: "
+	const aiPrefix = "AI: "
+	const waitingPrefix = "AI_WAIT: "
+
+	switch {
+	case strings.HasPrefix(line, userPrefix):
+		body := strings.TrimPrefix(line, userPrefix)
+		style := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("240")).
+			Padding(0, 1)
+		if h.width > 8 {
+			style = style.MaxWidth(h.width - 8)
+		}
+		return historyEntry{raw: body, content: style.Render(body), styled: true}
+	case strings.HasPrefix(line, waitingPrefix):
+		body := strings.TrimPrefix(line, waitingPrefix)
+		content := lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Render(body)
+		return historyEntry{raw: body, content: content, styled: true}
+	case strings.HasPrefix(line, aiPrefix):
+		body := strings.TrimPrefix(line, aiPrefix)
+		return historyEntry{raw: body, content: body}
+	case strings.HasPrefix(line, "Tool: "), strings.HasPrefix(line, "Cmd: "), strings.HasPrefix(line, "Error: "), strings.HasPrefix(line, "System: "):
+		parts := strings.SplitN(line, ": ", 2)
+		if len(parts) == 2 {
+			label := lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Render(parts[0])
+			return historyEntry{raw: parts[1], content: label + ": " + parts[1], styled: true}
+		}
+	}
+	return historyEntry{raw: line, content: line}
+}
+
+func renderMultilineEntry(b *strings.Builder, marker, content string) {
+	lines := strings.Split(content, "\n")
+	for i, line := range lines {
+		prefix := "  "
+		if i == 0 {
+			prefix = marker
+		}
+		fmt.Fprintf(b, "%s%s\n", prefix, line)
+	}
 }

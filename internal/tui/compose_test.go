@@ -51,6 +51,27 @@ func TestComposeMoveDownEmptyBufferNoop(t *testing.T) {
 	}
 }
 
+func TestComposeResetClearsState(t *testing.T) {
+	c := newComposeWithBuffer("text", 2)
+	c.visualActive = true
+	c.visualAnchor = 1
+
+	c.Reset()
+
+	if got := len(c.buf); got != 0 {
+		t.Fatalf("expected buffer cleared, got len %v", got)
+	}
+	if c.cursor != 0 {
+		t.Fatalf("expected cursor reset to 0, got %v", c.cursor)
+	}
+	if c.col != -1 {
+		t.Fatalf("expected col reset to -1, got %v", c.col)
+	}
+	if c.visualActive {
+		t.Fatalf("expected visual cleared")
+	}
+}
+
 func TestBindingsUseComposeVerticalMoves(t *testing.T) {
 	app := NewApp()
 	app.activePane = PaneCompose

@@ -167,8 +167,6 @@ func findBinding(bindings []Binding, pane Pane, mode Mode, ks KeyStroke) (Action
 	}
 	return 0, false
 }
-
-// leaderBindings defines key combos that are interpreted after a leader key.
 func leaderBindings() []Binding {
 	return []Binding{
 		{Pane: PaneAny, Mode: ModeAny, Key: KeyStroke{Type: tea.KeyRunes, Runes: "j"}, Action: ActionFocusCompose},

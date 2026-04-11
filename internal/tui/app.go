@@ -1,44 +1,83 @@
 package tui
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"regexp"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/boatnoah/kata/internal/codex"
 )
 
-// App is the root Bubble Tea model.
 type App struct {
-	mode          Mode
-	prevMode      Mode
-	activePane    Pane
-	history       *HistoryScreen
-	compose       *Compose
-	command       *CommandLine
-	bindings      []Binding
-	leaderPending bool
-	deletePending bool
-	width         int
-	height        int
+	mode               Mode
+	prevMode           Mode
+	activePane         Pane
+	history            *HistoryScreen
+	compose            *Compose
+	command            *CommandLine
+	bindings           []Binding
+	leaderPending      bool
+	deletePending      bool
+	width              int
+	height             int
+	ai                 *AIManager
+	aiStreams          map[string]string
+	aiRendered         map[string]string
+	aiIndexes          map[string]int
+	aiIconIdx          map[string]int
+	aiTypes            map[string]string
+	aiCompleted        map[string]bool
+	aiTicking          map[string]bool
+	aiTurnPlaceholders map[string]string
 }
 
-// NewApp constructs the application with history + compose panes.
+const aiTypeInterval = 35 * time.Millisecond
+const aiRunesPerTick = 3
+
+type codexEventMsg struct{ ev codex.Event }
+type codexErrorMsg struct{ err error }
+type aiTickMsg struct{ itemID string }
+
+const aiTypeResponse = "AI"
+const aiTypeWaiting = "AI_WAIT"
+
+var spinnerVerbs = []string{
+	"Accomplishing", "Actioning", "Actualizing", "Architecting", "Baking", "Beaming", "Beboppin'", "Befuddling", "Billowing", "Blanching", "Bloviating", "Boogieing", "Boondoggling", "Booping", "Bootstrapping", "Brewing", "Bunning", "Burrowing", "Calculating", "Canoodling", "Caramelizing", "Cascading", "Catapulting", "Cerebrating", "Channeling", "Channelling", "Choreographing", "Churning", "Clauding", "Coalescing", "Cogitating", "Combobulating", "Composing", "Computing", "Concocting", "Considering", "Contemplating", "Cooking", "Crafting", "Creating", "Crunching", "Crystallizing", "Cultivating", "Deciphering", "Deliberating", "Determining", "Dilly-dallying", "Discombobulating", "Doing", "Doodling", "Drizzling", "Ebbing", "Effecting", "Elucidating", "Embellishing", "Enchanting", "Envisioning", "Evaporating", "Fermenting", "Fiddle-faddling", "Finagling", "Flambeing", "Flibbertigibbeting", "Flowing", "Flummoxing", "Fluttering", "Forging", "Forming", "Frolicking", "Frosting", "Gallivanting", "Galloping", "Garnishing", "Generating", "Gesticulating", "Germinating", "Gitifying", "Grooving", "Gusting", "Harmonizing", "Hashing", "Hatching", "Herding", "Honking", "Hullaballooing", "Hyperspacing", "Ideating", "Imagining", "Improvising", "Incubating", "Inferring", "Infusing", "Ionizing", "Jitterbugging", "Julienning", "Kneading", "Leavening", "Levitating", "Lollygagging", "Manifesting", "Marinating", "Meandering", "Metamorphosing", "Misting", "Moonwalking", "Moseying", "Mulling", "Mustering", "Musing", "Nebulizing", "Nesting", "Newspapering", "Noodling", "Nucleating", "Orbiting", "Orchestrating", "Osmosing", "Perambulating", "Percolating", "Perusing", "Philosophising", "Photosynthesizing", "Pollinating", "Pondering", "Pontificating", "Pouncing", "Precipitating", "Prestidigitating", "Processing", "Proofing", "Propagating", "Puttering", "Puzzling", "Quantumizing", "Razzle-dazzling", "Razzmatazzing", "Recombobulating", "Reticulating", "Roosting", "Ruminating", "Sauteing", "Scampering", "Schlepping", "Scurrying", "Seasoning", "Shenaniganing", "Shimmying", "Simmering", "Skedaddling", "Sketching", "Slithering", "Smooshing", "Sock-hopping", "Spelunking", "Spinning", "Sprouting", "Stewing", "Sublimating", "Swirling", "Swooping", "Symbioting", "Synthesizing", "Tempering", "Thinking", "Thundering", "Tinkering", "Tomfoolering", "Topsy-turvying", "Transfiguring", "Transmuting", "Twisting", "Undulating", "Unfurling", "Unravelling", "Vibing", "Waddling", "Wandering", "Warping", "Whatchamacalliting", "Whirlpooling", "Whirring", "Whisking", "Wibbling", "Working", "Wrangling", "Zesting", "Zigzagging",
+}
+
+var spinnerIcons = []string{"|", "/", "-", "\\"}
+
 func NewApp() *App {
 	return &App{
-		mode:       ModeNormal,
-		prevMode:   ModeNormal,
-		activePane: PaneCompose,
-		history:    NewHistoryScreen(),
-		compose:    NewCompose(),
-		command:    NewCommandLine(),
-		bindings:   defaultBindings(),
+		mode:               ModeNormal,
+		prevMode:           ModeNormal,
+		activePane:         PaneCompose,
+		history:            NewHistoryScreen(),
+		compose:            NewCompose(),
+		command:            NewCommandLine(),
+		bindings:           defaultBindings(),
+		ai:                 newAIManager(),
+		aiStreams:          make(map[string]string),
+		aiRendered:         make(map[string]string),
+		aiIndexes:          make(map[string]int),
+		aiIconIdx:          make(map[string]int),
+		aiTypes:            make(map[string]string),
+		aiCompleted:        make(map[string]bool),
+		aiTicking:          make(map[string]bool),
+		aiTurnPlaceholders: make(map[string]string),
 	}
 }
 
 var _ tea.Model = (*App)(nil)
 
 func (a *App) Init() tea.Cmd {
-	return nil
+	return a.subscribeAI()
 }
 
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -51,6 +90,13 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		logKey(m)
 		return a, a.handleKey(m)
+	case codexEventMsg:
+		return a, tea.Batch(a.subscribeAI(), a.handleCodexEvent(m.ev))
+	case codexErrorMsg:
+		a.history.AppendMessage("System: " + m.err.Error())
+		return a, a.subscribeAI()
+	case aiTickMsg:
+		return a, a.handleAITick(m.itemID)
 	default:
 		return a, nil
 	}
@@ -64,7 +110,6 @@ func (a *App) handleKey(msg tea.KeyMsg) tea.Cmd {
 			a.compose.DeleteCurrentLine()
 			return nil
 		}
-		// fallthrough to normal handling
 	}
 
 	if a.activePane == PaneCompose && a.mode == ModeNormal {
@@ -73,7 +118,7 @@ func (a *App) handleKey(msg tea.KeyMsg) tea.Cmd {
 			return nil
 		}
 	}
-	// Command-line mode bypasses other bindings and leader logic.
+
 	if a.mode == ModeCommandLine {
 		execute, cancel, input := a.command.HandleKey(msg)
 		if cancel {
@@ -86,17 +131,14 @@ func (a *App) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 
-	// If a leader key was pressed previously, interpret this key using leader bindings.
 	if a.leaderPending {
 		a.leaderPending = false
 		ks := keystrokeFromMsg(msg)
 		if action, ok := findBinding(leaderBindings(), PaneAny, ModeAny, ks); ok {
 			return a.applyAction(action)
 		}
-		// fallthrough to normal handling if leader combo not recognized
 	}
 
-	// Start leader sequence when not in insert mode.
 	if a.mode != ModeInsert && isLeaderMsg(msg) {
 		a.leaderPending = true
 		return nil
@@ -107,7 +149,6 @@ func (a *App) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return a.applyAction(action)
 	}
 
-	// Compose insert-mode typing fallback.
 	if a.activePane == PaneCompose && a.mode == ModeInsert {
 		if a.handleComposeInsertKey(msg) {
 			return nil
@@ -182,13 +223,14 @@ func (a *App) applyAction(action ActionID) tea.Cmd {
 		a.compose.exitVisualIfActive()
 		a.history.ExitVisual()
 	case ActionEnterVisual:
-		if a.activePane == PaneCompose {
+		switch a.activePane {
+		case PaneCompose:
 			a.mode = ModeVisual
 			a.compose.EnterVisual()
-		} else if a.activePane == PaneHistory {
+		case PaneHistory:
 			a.mode = ModeVisual
 			a.history.EnterVisual()
-		} else {
+		default:
 			a.mode = ModeVisual
 		}
 	case ActionEnterCommandLine:
@@ -342,9 +384,18 @@ func (a *App) runCommand(input string) tea.Cmd {
 	fields := strings.Fields(trimmed)
 	name := strings.ToLower(fields[0])
 	switch name {
-	case "q", "quit":
+	case "q":
 		a.exitCommandLine()
 		return tea.Quit
+	case "w":
+		a.exitCommandLine()
+		message := a.compose.Content()
+		a.compose.Reset()
+		if strings.TrimSpace(message) == "" {
+			return nil
+		}
+		a.history.AppendMessage("User: " + message)
+		return a.sendToAI(message)
 	default:
 		// Unknown command: exit command mode quietly.
 		a.exitCommandLine()
@@ -360,6 +411,305 @@ func (a *App) switchPane() {
 		a.activePane = PaneHistory
 	}
 	a.ensureModeSupported()
+}
+
+// subscribeAI waits for the next Codex event and returns it as a tea.Msg.
+func (a *App) subscribeAI() tea.Cmd {
+	if a == nil || a.ai == nil {
+		return nil
+	}
+	ch := a.ai.Events()
+	if ch == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		ev, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return codexEventMsg{ev: ev}
+	}
+}
+
+// sendToAI kicks off a Codex turn and keeps streaming via messages.
+func (a *App) sendToAI(text string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := a.ai.SendText(ctx, text); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				err = fmt.Errorf("codex request timed out (is the backend running?)")
+			}
+			return codexErrorMsg{err: err}
+		}
+		return nil
+	}
+}
+
+func (a *App) handleCodexEvent(ev codex.Event) tea.Cmd {
+	switch ev.Type {
+	case codex.EventTurnStarted:
+		return a.startAIThinking(ev.TurnID)
+	case codex.EventAgentDelta:
+		a.adoptThinkingPlaceholder(ev.TurnID, ev.ItemID)
+		return a.upsertAIStream(ev.ItemID, aiTypeResponse, ev.Text, false)
+	case codex.EventAgentCompleted:
+		a.adoptThinkingPlaceholder(ev.TurnID, ev.ItemID)
+		return a.upsertAIStream(ev.ItemID, aiTypeResponse, ev.Text, true)
+	case codex.EventToolCall:
+		return a.upsertAIStream(ev.ItemID, "Tool", ev.Text, false)
+	case codex.EventCommandOutput:
+		return a.upsertAIStream(ev.ItemID, "Cmd", ev.Text, false)
+	case codex.EventTurnCompleted:
+		if ev.Payload != nil {
+			if errVal, ok := ev.Payload["error"]; ok {
+				a.history.AppendMessage("Error: " + sanitizeText(fmt.Sprint(errVal)))
+			}
+		}
+		// Finalize any active streams.
+		var cmds []tea.Cmd
+		for id, label := range a.aiTypes {
+			cmds = append(cmds, a.upsertAIStream(id, label, "", true))
+		}
+		return tea.Batch(cmds...)
+	case codex.EventError:
+		if ev.Payload != nil {
+			if msg, ok := ev.Payload["error"].(string); ok {
+				a.history.AppendMessage("Error: " + sanitizeText(msg))
+			}
+		}
+	}
+	return nil
+}
+
+func (a *App) upsertAIStream(itemID, label, delta string, completed bool) tea.Cmd {
+	a.aiTypes[itemID] = label
+	if completed {
+		finalText := sanitizeHistoryMessage(delta)
+		if finalText != "" {
+			a.aiStreams[itemID] = finalText
+		} else if _, ok := a.aiStreams[itemID]; !ok {
+			a.aiStreams[itemID] = ""
+		}
+	} else if strings.TrimSpace(delta) == "" {
+		if _, ok := a.aiStreams[itemID]; !ok {
+			a.aiStreams[itemID] = ""
+		}
+	} else {
+		cleanDelta := sanitizeStreamDelta(delta)
+		if cleanDelta != "" {
+			a.aiStreams[itemID] = a.aiStreams[itemID] + cleanDelta
+		}
+	}
+	if completed {
+		a.aiCompleted[itemID] = true
+	}
+	if _, ok := a.aiRendered[itemID]; !ok {
+		a.aiRendered[itemID] = ""
+	}
+	if !a.aiTicking[itemID] && a.aiRendered[itemID] == "" && a.aiStreams[itemID] != "" {
+		a.advanceAIStream(itemID)
+	}
+	a.renderAIStream(itemID)
+	if a.aiRendered[itemID] == a.aiStreams[itemID] {
+		if a.aiCompleted[itemID] {
+			a.finalizeAIStream(itemID)
+		}
+		return nil
+	}
+	if a.aiTicking[itemID] {
+		return nil
+	}
+	a.aiTicking[itemID] = true
+	return a.scheduleAITick(itemID)
+}
+
+func (a *App) handleAITick(itemID string) tea.Cmd {
+	a.aiTicking[itemID] = false
+	if a.aiRendered[itemID] != a.aiStreams[itemID] {
+		a.advanceAIStream(itemID)
+		a.renderAIStream(itemID)
+	}
+	if a.aiRendered[itemID] == a.aiStreams[itemID] {
+		if a.isWaitingForAI(itemID) {
+			a.renderAIStream(itemID)
+			a.aiTicking[itemID] = true
+			return a.scheduleAITick(itemID)
+		}
+		if a.aiCompleted[itemID] {
+			a.finalizeAIStream(itemID)
+		}
+		return nil
+	}
+	a.aiTicking[itemID] = true
+	return a.scheduleAITick(itemID)
+}
+
+func (a *App) scheduleAITick(itemID string) tea.Cmd {
+	return tea.Tick(aiTypeInterval, func(time.Time) tea.Msg {
+		return aiTickMsg{itemID: itemID}
+	})
+}
+
+func (a *App) advanceAIStream(itemID string) {
+	target := []rune(a.aiStreams[itemID])
+	current := []rune(a.aiRendered[itemID])
+	if len(current) >= len(target) {
+		a.aiRendered[itemID] = string(target)
+		return
+	}
+	next := len(current) + aiRunesPerTick
+	if next > len(target) {
+		next = len(target)
+	}
+	a.aiRendered[itemID] = string(target[:next])
+}
+
+func (a *App) renderAIStream(itemID string) {
+	label, ok := a.aiTypes[itemID]
+	if !ok {
+		return
+	}
+	buf := a.aiRendered[itemID]
+	completed := a.aiCompleted[itemID] && a.aiRendered[itemID] == a.aiStreams[itemID]
+	line := label + ": " + buf
+	if label == aiTypeWaiting && !completed {
+		line = aiTypeWaiting + ": " + a.nextIcon(itemID) + " Thinking"
+	}
+	focus := a.shouldFollowHistory(itemID)
+	if idx, ok := a.aiIndexes[itemID]; ok {
+		a.history.UpdateMessageAtWithFocus(idx, line, focus)
+	} else {
+		idx := a.history.AppendMessageWithFocus(line, focus)
+		a.aiIndexes[itemID] = idx
+	}
+}
+
+func (a *App) finalizeAIStream(itemID string) {
+	label, ok := a.aiTypes[itemID]
+	if !ok {
+		return
+	}
+	final := label + ": " + a.aiRendered[itemID]
+	focus := a.shouldFollowHistory(itemID)
+	if idx, ok := a.aiIndexes[itemID]; ok {
+		a.history.UpdateMessageAtWithFocus(idx, final, focus)
+	}
+	delete(a.aiIconIdx, itemID)
+	delete(a.aiTypes, itemID)
+	delete(a.aiCompleted, itemID)
+	delete(a.aiTicking, itemID)
+}
+
+func (a *App) shouldFollowHistory(itemID string) bool {
+	idx, ok := a.aiIndexes[itemID]
+	if !ok {
+		return a.activePane != PaneHistory || a.history.cursor >= len(a.history.messages)-1
+	}
+	return a.activePane != PaneHistory || a.history.cursor == idx || a.history.cursor >= len(a.history.messages)-1
+}
+
+func (a *App) nextIcon(itemID string) string {
+	if len(spinnerIcons) == 0 {
+		return ">"
+	}
+	idx := a.aiIconIdx[itemID]
+	icon := spinnerIcons[idx%len(spinnerIcons)]
+	a.aiIconIdx[itemID] = idx + 1
+	return icon
+}
+
+func (a *App) startAIThinking(turnID string) tea.Cmd {
+	if turnID == "" {
+		return nil
+	}
+	itemID := "turn:" + turnID
+	a.aiTurnPlaceholders[turnID] = itemID
+	a.aiTypes[itemID] = aiTypeWaiting
+	if _, ok := a.aiRendered[itemID]; !ok {
+		a.aiRendered[itemID] = ""
+	}
+	if _, ok := a.aiStreams[itemID]; !ok {
+		a.aiStreams[itemID] = ""
+	}
+	a.renderAIStream(itemID)
+	if a.aiTicking[itemID] {
+		return nil
+	}
+	a.aiTicking[itemID] = true
+	return a.scheduleAITick(itemID)
+}
+
+func (a *App) adoptThinkingPlaceholder(turnID, itemID string) {
+	placeholderID, ok := a.aiTurnPlaceholders[turnID]
+	if !ok || placeholderID == itemID {
+		return
+	}
+	if idx, ok := a.aiIndexes[placeholderID]; ok {
+		a.aiIndexes[itemID] = idx
+		delete(a.aiIndexes, placeholderID)
+	}
+	if rendered, ok := a.aiRendered[placeholderID]; ok {
+		a.aiRendered[itemID] = rendered
+		delete(a.aiRendered, placeholderID)
+	}
+	if stream, ok := a.aiStreams[placeholderID]; ok {
+		a.aiStreams[itemID] = stream
+		delete(a.aiStreams, placeholderID)
+	}
+	if _, ok := a.aiTicking[placeholderID]; ok {
+		a.aiTicking[itemID] = false
+		delete(a.aiTicking, placeholderID)
+	}
+	if iconIdx, ok := a.aiIconIdx[placeholderID]; ok {
+		a.aiIconIdx[itemID] = iconIdx
+		delete(a.aiIconIdx, placeholderID)
+	}
+	delete(a.aiTypes, placeholderID)
+	delete(a.aiCompleted, placeholderID)
+	delete(a.aiTurnPlaceholders, turnID)
+}
+
+func (a *App) isWaitingForAI(itemID string) bool {
+	return a.aiTypes[itemID] == aiTypeWaiting && a.aiStreams[itemID] == "" && !a.aiCompleted[itemID]
+}
+
+func sanitizeText(s string) string {
+	s = stripSystemReminders(s)
+	s = strings.TrimSpace(s)
+	return s
+}
+
+var systemReminderPattern = regexp.MustCompile(`(?s)<system-reminder>.*?</system-reminder>`)
+
+func stripSystemReminders(s string) string {
+	return systemReminderPattern.ReplaceAllString(s, "")
+}
+
+func sanitizeStreamDelta(s string) string {
+	s = stripSystemReminders(s)
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	return s
+}
+
+func sanitizeHistoryMessage(s string) string {
+	for {
+		start := strings.Index(s, "<system-reminder>")
+		if start == -1 {
+			break
+		}
+		end := strings.Index(s, "</system-reminder>")
+		if end == -1 {
+			s = s[:start]
+			break
+		}
+		s = s[:start] + s[end+len("</system-reminder>"):]
+	}
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	s = strings.TrimRight(s, "\n")
+	return s
 }
 
 func (a *App) handleComposeInsertKey(msg tea.KeyMsg) bool {
@@ -399,10 +749,7 @@ func (a *App) View() string {
 	composeHeight := 5
 	if a.height > 0 {
 		// Leave room for status line and at least one history line.
-		maxAllowed := a.height - 2
-		if maxAllowed < 3 {
-			maxAllowed = 3
-		}
+		maxAllowed := max(a.height-2, 3)
 		if composeHeight > maxAllowed {
 			composeHeight = maxAllowed
 		}
