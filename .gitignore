@@ -1,0 +1,9 @@
+# binaries
+bin/
+kata
+
+# go
+*.out
+
+# env
+.env
