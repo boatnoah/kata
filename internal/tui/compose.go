@@ -1,9 +1,11 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/reflow/wrap"
 )
 
 // Compose holds the state of the compose/input area.
@@ -398,127 +400,192 @@ func (c *Compose) OpenAbove() {
 }
 
 // View renders the compose buffer with a visible cursor.
-// targetLines limits the total rendered height (including the border). Pass 0 for no limit.
+// targetLines limits the total rendered height. Pass 0 for no limit.
+// modeLabel is embedded in the separator line (e.g. "INSERT", "VISUAL", or "" for normal).
 // It returns the rendered string and its line count.
-func (c *Compose) View(width int, targetLines int) (string, int) {
+func (c *Compose) View(width int, targetLines int, modeLabel string) (string, int) {
 	content := c.renderWithCursor()
+	innerWidth := 0
+	if width > 0 {
+		innerWidth = width - 4 // account for "> " prefix + padding
+		if innerWidth < 1 {
+			innerWidth = 1
+		}
+	}
+	bodyLines := composeWrappedLines(content, innerWidth)
 
-	// Cap the number of rendered lines (including the header) before adding the border.
-	// Account for the border's top and bottom lines so the final height stays within targetLines.
+	// Cap visible lines to keep cursor visible.
 	if targetLines > 0 {
-		available := targetLines - 2 // border adds two lines
+		available := targetLines - 1 // 1 line for separator
 		if available < 1 {
 			available = 1
 		}
-		lines := strings.Split(content, "\n")
-		if len(lines) > available {
-			// Keep the header (line 0) and scroll the body to keep the cursor visible.
-			cursorLine := c.cursorRenderLine()
-			body := lines[1:]
-			bodyCursorLine := cursorLine - 1
-			if bodyCursorLine < 0 {
-				bodyCursorLine = 0
-			}
-
-			window := available - 1 // leave room for header
-			if window < 1 {
-				window = 1
-			}
-
-			start := bodyCursorLine - (window - 1)
+		if len(bodyLines) > available {
+			cursorLine := c.cursorRenderLineWrapped(innerWidth)
+			start := cursorLine - (available - 1)
 			if start < 0 {
 				start = 0
 			}
-			end := start + window
-			if end > len(body) {
-				end = len(body)
-				start = end - window
+			end := start + available
+			if end > len(bodyLines) {
+				end = len(bodyLines)
+				start = end - available
 				if start < 0 {
 					start = 0
 				}
 			}
-			body = body[start:end]
-			lines = append([]string{lines[0]}, body...)
+			bodyLines = bodyLines[start:end]
 		}
-		content = strings.Join(lines, "\n")
 	}
 
-	borderColor := lipgloss.Color("#666666")
+	// Build output: separator line (with optional mode label) + prompt-prefixed body.
+	var b strings.Builder
+	sepColor := lipgloss.Color("#444444")
 	if c.active {
-		borderColor = lipgloss.Color("#4ea4ff")
+		sepColor = lipgloss.Color("#4ea4ff")
+	}
+	sepStyle := lipgloss.NewStyle().Foreground(sepColor)
+
+	if modeLabel != "" {
+		labelStyled := lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Render(" " + modeLabel + " ")
+		labelWidth := lipgloss.Width(labelStyled)
+		dashCount := max(width-labelWidth, 0)
+		leftDashes := 2
+		rightDashes := dashCount - leftDashes
+		if rightDashes < 0 {
+			rightDashes = 0
+		}
+		b.WriteString(sepStyle.Render(strings.Repeat("─", leftDashes)))
+		b.WriteString(labelStyled)
+		b.WriteString(sepStyle.Render(strings.Repeat("─", rightDashes)))
+	} else {
+		b.WriteString(sepStyle.Render(strings.Repeat("─", max(width, 1))))
+	}
+	b.WriteRune('\n')
+
+	prompt := lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Bold(true).Render(">")
+	for i, line := range bodyLines {
+		if i == 0 {
+			fmt.Fprintf(&b, "%s %s", prompt, line)
+		} else {
+			fmt.Fprintf(&b, "  %s", line)
+		}
+		if i < len(bodyLines)-1 {
+			b.WriteRune('\n')
+		}
 	}
 
-	style := lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(borderColor)
-	if width > 0 {
-		inner := width - 2 // account for left/right border runes
-		if inner < 1 {
-			inner = 1
-		}
-		style = style.Width(inner)
-	}
-	if targetLines > 0 {
-		contentHeight := targetLines - 2 // exclude border lines
-		if contentHeight < 1 {
-			contentHeight = 1
-		}
-		style = style.Height(contentHeight)
-	}
+	result := b.String()
+	lineCount := strings.Count(result, "\n") + 1
+	return result, lineCount
+}
 
-	box := style.Render(content)
-	lines := strings.Count(box, "\n") + 1
-	return box, lines
+func (c *Compose) cursorRenderLineWrapped(width int) int {
+	if width <= 0 {
+		return c.cursorRenderLine()
+	}
+	lineIdx, col := c.lineAndColumn()
+	wrappedLine := 0
+	for i := 0; i < lineIdx; i++ {
+		start, end := c.boundsForLine(i)
+		wrappedLine += max(len(strings.Split(wrap.String(string(c.buf[start:end]), width), "\n")), 1)
+	}
+	start, _ := c.boundsForLine(lineIdx)
+	prefix := string(c.buf[start:min(start+col, len(c.buf))])
+	wrappedPrefix := strings.Split(wrap.String(prefix, width), "\n")
+	wrappedLine += max(len(wrappedPrefix), 1) - 1
+	return wrappedLine
+}
+
+func composeWrappedLines(content string, width int) []string {
+	if width <= 0 {
+		return strings.Split(content, "\n")
+	}
+	rawLines := strings.Split(content, "\n")
+	wrapped := make([]string, 0, len(rawLines))
+	for _, line := range rawLines {
+		segments := strings.Split(wrap.String(line, width), "\n")
+		if len(segments) == 0 {
+			wrapped = append(wrapped, "")
+			continue
+		}
+		wrapped = append(wrapped, segments...)
+	}
+	return wrapped
+}
+
+func (c *Compose) boundsForLine(targetLine int) (int, int) {
+	line := 0
+	start := 0
+	for i, r := range c.buf {
+		if line == targetLine && r == '\n' {
+			return start, i
+		}
+		if r == '\n' {
+			line++
+			start = i + 1
+		}
+	}
+	if line == targetLine {
+		return start, len(c.buf)
+	}
+	return len(c.buf), len(c.buf)
 }
 
 // cursorRenderLine returns the zero-based line index (within the unbordered render)
 // where the cursor is placed, accounting for the header line.
 func (c *Compose) cursorRenderLine() int {
 	lineIdx, _ := c.lineAndColumn()
-	// Add one for the header line in renderWithCursor.
-	return lineIdx + 1
+	return lineIdx
 }
 
 func (c *Compose) renderWithCursor() string {
 	var b strings.Builder
 	box := cursorBox()
+	sel := selectionBox()
 	lo, hi, hasSel := c.selectionRange()
+
+	// Flush a batch of selected characters as a single styled run.
+	var selBatch strings.Builder
+	flushSel := func() {
+		if selBatch.Len() > 0 {
+			b.WriteString(sel.wrap(selBatch.String()))
+			selBatch.Reset()
+		}
+	}
+
 	for i, r := range c.buf {
 		inSel := hasSel && i >= lo && i < hi
-		if i == c.cursor && c.active {
+		isCursor := i == c.cursor && c.active
+
+		if isCursor {
+			flushSel()
 			if r == '\n' {
-				cursor := box.wrap(" ")
-				if inSel {
-					cursor = selectionBox().wrap(cursor)
-				}
-				b.WriteString(cursor)
+				b.WriteString(box.wrap(" "))
 				b.WriteRune('\n')
-				continue
+			} else {
+				b.WriteString(box.wrap(string(r)))
 			}
-			cursor := box.wrap(string(r))
-			if inSel {
-				cursor = selectionBox().wrap(cursor)
-			}
-			b.WriteString(cursor)
 			continue
 		}
 		if inSel {
-			b.WriteString(selectionBox().wrap(string(r)))
+			if r == '\n' {
+				flushSel()
+				b.WriteRune('\n')
+			} else {
+				selBatch.WriteRune(r)
+			}
 			continue
 		}
+		flushSel()
 		b.WriteRune(r)
 	}
-	if c.cursor == len(c.buf) {
-		cursor := ""
-		if c.active {
-			cursor = box.wrap(" ")
-		}
-		if hasSel && c.cursor >= lo && c.cursor < hi {
-			cursor = selectionBox().wrap(cursor)
-		}
-		if cursor != "" {
-			b.WriteString(cursor)
-		}
+	flushSel()
+
+	if c.cursor == len(c.buf) && c.active {
+		b.WriteString(box.wrap(" "))
 	}
-	return "Compose\n" + b.String()
+	return b.String()
 }
 
 func (c *Compose) cursorColumn() int {

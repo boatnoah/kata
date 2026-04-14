@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"regexp"
 	"strings"
 	"time"
@@ -24,14 +25,16 @@ type App struct {
 	bindings           []Binding
 	leaderPending      bool
 	deletePending      bool
+	statusNotice       string
 	width              int
 	height             int
 	ai                 *AIManager
 	aiStreams          map[string]string
 	aiRendered         map[string]string
 	aiIndexes          map[string]int
-	aiIconIdx          map[string]int
-	aiTypes            map[string]string
+	aiVerbIdx          map[string]int
+	aiWaitFrames       map[string]int
+	aiTypes            map[string]TranscriptKind
 	aiCompleted        map[string]bool
 	aiTicking          map[string]bool
 	aiTurnPlaceholders map[string]string
@@ -43,15 +46,14 @@ const aiRunesPerTick = 3
 type codexEventMsg struct{ ev codex.Event }
 type codexErrorMsg struct{ err error }
 type aiTickMsg struct{ itemID string }
+type clearStatusMsg struct{}
 
-const aiTypeResponse = "AI"
-const aiTypeWaiting = "AI_WAIT"
+const aiTypeResponse = TranscriptAssistant
+const aiTypeWaiting = TranscriptThinking
 
-var spinnerVerbs = []string{
-	"Accomplishing", "Actioning", "Actualizing", "Architecting", "Baking", "Beaming", "Beboppin'", "Befuddling", "Billowing", "Blanching", "Bloviating", "Boogieing", "Boondoggling", "Booping", "Bootstrapping", "Brewing", "Bunning", "Burrowing", "Calculating", "Canoodling", "Caramelizing", "Cascading", "Catapulting", "Cerebrating", "Channeling", "Channelling", "Choreographing", "Churning", "Clauding", "Coalescing", "Cogitating", "Combobulating", "Composing", "Computing", "Concocting", "Considering", "Contemplating", "Cooking", "Crafting", "Creating", "Crunching", "Crystallizing", "Cultivating", "Deciphering", "Deliberating", "Determining", "Dilly-dallying", "Discombobulating", "Doing", "Doodling", "Drizzling", "Ebbing", "Effecting", "Elucidating", "Embellishing", "Enchanting", "Envisioning", "Evaporating", "Fermenting", "Fiddle-faddling", "Finagling", "Flambeing", "Flibbertigibbeting", "Flowing", "Flummoxing", "Fluttering", "Forging", "Forming", "Frolicking", "Frosting", "Gallivanting", "Galloping", "Garnishing", "Generating", "Gesticulating", "Germinating", "Gitifying", "Grooving", "Gusting", "Harmonizing", "Hashing", "Hatching", "Herding", "Honking", "Hullaballooing", "Hyperspacing", "Ideating", "Imagining", "Improvising", "Incubating", "Inferring", "Infusing", "Ionizing", "Jitterbugging", "Julienning", "Kneading", "Leavening", "Levitating", "Lollygagging", "Manifesting", "Marinating", "Meandering", "Metamorphosing", "Misting", "Moonwalking", "Moseying", "Mulling", "Mustering", "Musing", "Nebulizing", "Nesting", "Newspapering", "Noodling", "Nucleating", "Orbiting", "Orchestrating", "Osmosing", "Perambulating", "Percolating", "Perusing", "Philosophising", "Photosynthesizing", "Pollinating", "Pondering", "Pontificating", "Pouncing", "Precipitating", "Prestidigitating", "Processing", "Proofing", "Propagating", "Puttering", "Puzzling", "Quantumizing", "Razzle-dazzling", "Razzmatazzing", "Recombobulating", "Reticulating", "Roosting", "Ruminating", "Sauteing", "Scampering", "Schlepping", "Scurrying", "Seasoning", "Shenaniganing", "Shimmying", "Simmering", "Skedaddling", "Sketching", "Slithering", "Smooshing", "Sock-hopping", "Spelunking", "Spinning", "Sprouting", "Stewing", "Sublimating", "Swirling", "Swooping", "Symbioting", "Synthesizing", "Tempering", "Thinking", "Thundering", "Tinkering", "Tomfoolering", "Topsy-turvying", "Transfiguring", "Transmuting", "Twisting", "Undulating", "Unfurling", "Unravelling", "Vibing", "Waddling", "Wandering", "Warping", "Whatchamacalliting", "Whirlpooling", "Whirring", "Whisking", "Wibbling", "Working", "Wrangling", "Zesting", "Zigzagging",
-}
+var spinnerVerbs = []string{"Thinking", "Reasoning", "Inspecting"}
 
-var spinnerIcons = []string{"|", "/", "-", "\\"}
+var spinnerDots = []string{".", "..", "..."}
 
 func NewApp() *App {
 	return &App{
@@ -66,8 +68,9 @@ func NewApp() *App {
 		aiStreams:          make(map[string]string),
 		aiRendered:         make(map[string]string),
 		aiIndexes:          make(map[string]int),
-		aiIconIdx:          make(map[string]int),
-		aiTypes:            make(map[string]string),
+		aiVerbIdx:          make(map[string]int),
+		aiWaitFrames:       make(map[string]int),
+		aiTypes:            make(map[string]TranscriptKind),
 		aiCompleted:        make(map[string]bool),
 		aiTicking:          make(map[string]bool),
 		aiTurnPlaceholders: make(map[string]string),
@@ -93,10 +96,13 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case codexEventMsg:
 		return a, tea.Batch(a.subscribeAI(), a.handleCodexEvent(m.ev))
 	case codexErrorMsg:
-		a.history.AppendMessage("System: " + m.err.Error())
+		a.history.AppendItem(TranscriptItem{Kind: TranscriptSystem, Text: m.err.Error()}, true)
 		return a, a.subscribeAI()
 	case aiTickMsg:
 		return a, a.handleAITick(m.itemID)
+	case clearStatusMsg:
+		a.statusNotice = ""
+		return a, nil
 	default:
 		return a, nil
 	}
@@ -221,17 +227,10 @@ func (a *App) applyAction(action ActionID) tea.Cmd {
 	case ActionEnterNormal:
 		a.mode = ModeNormal
 		a.compose.exitVisualIfActive()
-		a.history.ExitVisual()
 	case ActionEnterVisual:
-		switch a.activePane {
-		case PaneCompose:
+		if a.activePane == PaneCompose {
 			a.mode = ModeVisual
 			a.compose.EnterVisual()
-		case PaneHistory:
-			a.mode = ModeVisual
-			a.history.EnterVisual()
-		default:
-			a.mode = ModeVisual
 		}
 	case ActionEnterCommandLine:
 		a.enterCommandLine()
@@ -303,51 +302,6 @@ func (a *App) applyAction(action ActionID) tea.Cmd {
 		if a.activePane == PaneCompose {
 			a.compose.DeleteCurrentLine()
 		}
-	case ActionMoveUp:
-		if a.activePane == PaneHistory {
-			a.history.Move(-1)
-		}
-	case ActionMoveDown:
-		if a.activePane == PaneHistory {
-			a.history.Move(1)
-		}
-	case ActionJumpStart:
-		if a.activePane == PaneHistory {
-			a.history.JumpStart()
-		}
-	case ActionJumpEnd:
-		if a.activePane == PaneHistory {
-			a.history.JumpEnd()
-		}
-	case ActionHistoryLeft:
-		if a.activePane == PaneHistory {
-			a.history.MoveLeft()
-		}
-	case ActionHistoryRight:
-		if a.activePane == PaneHistory {
-			a.history.MoveRight()
-		}
-	case ActionHistoryHalfPageDown:
-		if a.activePane == PaneHistory {
-			a.history.MoveHalfPage(1)
-		}
-	case ActionHistoryHalfPageUp:
-		if a.activePane == PaneHistory {
-			a.history.MoveHalfPage(-1)
-		}
-	case ActionHistoryLineStart:
-		if a.activePane == PaneHistory {
-			a.history.LineStart()
-		}
-	case ActionHistoryLineEnd:
-		if a.activePane == PaneHistory {
-			a.history.LineEnd()
-		}
-	case ActionHistoryYank:
-		if a.activePane == PaneHistory {
-			a.history.YankSelection()
-			a.mode = ModeNormal
-		}
 	}
 
 	// Enforce mode compatibility if we changed panes or modes.
@@ -356,8 +310,12 @@ func (a *App) applyAction(action ActionID) tea.Cmd {
 }
 
 func (a *App) ensureModeSupported() {
-	if a.activePane == PaneHistory && a.mode == ModeInsert {
+	if a.activePane == PaneHistory && a.mode != ModeNormal && a.mode != ModeCommandLine {
 		a.mode = ModeNormal
+	}
+	// Always keep compose visual state in sync with app mode.
+	if a.mode != ModeVisual {
+		a.compose.exitVisualIfActive()
 	}
 }
 
@@ -371,6 +329,11 @@ func (a *App) enterCommandLine() {
 
 func (a *App) exitCommandLine() {
 	a.mode = a.prevMode
+	// If we were in visual mode but visual was cleared (e.g. by enterCommandLine),
+	// don't restore to visual — fall back to normal.
+	if a.mode == ModeVisual && !a.compose.visualActive {
+		a.mode = ModeNormal
+	}
 	a.command.Reset()
 }
 
@@ -394,7 +357,7 @@ func (a *App) runCommand(input string) tea.Cmd {
 		if strings.TrimSpace(message) == "" {
 			return nil
 		}
-		a.history.AppendMessage("User: " + message)
+		a.history.AppendItem(TranscriptItem{Kind: TranscriptUser, Text: message}, true)
 		return a.sendToAI(message)
 	default:
 		// Unknown command: exit command mode quietly.
@@ -457,13 +420,13 @@ func (a *App) handleCodexEvent(ev codex.Event) tea.Cmd {
 		a.adoptThinkingPlaceholder(ev.TurnID, ev.ItemID)
 		return a.upsertAIStream(ev.ItemID, aiTypeResponse, ev.Text, true)
 	case codex.EventToolCall:
-		return a.upsertAIStream(ev.ItemID, "Tool", ev.Text, false)
+		return a.upsertAIStream(ev.ItemID, TranscriptTool, summarizeToolCall(ev), false)
 	case codex.EventCommandOutput:
-		return a.upsertAIStream(ev.ItemID, "Cmd", ev.Text, false)
+		return nil
 	case codex.EventTurnCompleted:
 		if ev.Payload != nil {
 			if errVal, ok := ev.Payload["error"]; ok {
-				a.history.AppendMessage("Error: " + sanitizeText(fmt.Sprint(errVal)))
+				a.history.AppendItem(TranscriptItem{Kind: TranscriptError, Text: sanitizeText(fmt.Sprint(errVal))}, true)
 			}
 		}
 		// Finalize any active streams.
@@ -475,14 +438,14 @@ func (a *App) handleCodexEvent(ev codex.Event) tea.Cmd {
 	case codex.EventError:
 		if ev.Payload != nil {
 			if msg, ok := ev.Payload["error"].(string); ok {
-				a.history.AppendMessage("Error: " + sanitizeText(msg))
+				a.history.AppendItem(TranscriptItem{Kind: TranscriptError, Text: sanitizeText(msg)}, true)
 			}
 		}
 	}
 	return nil
 }
 
-func (a *App) upsertAIStream(itemID, label, delta string, completed bool) tea.Cmd {
+func (a *App) upsertAIStream(itemID string, label TranscriptKind, delta string, completed bool) tea.Cmd {
 	a.aiTypes[itemID] = label
 	if completed {
 		finalText := sanitizeHistoryMessage(delta)
@@ -532,6 +495,8 @@ func (a *App) handleAITick(itemID string) tea.Cmd {
 	}
 	if a.aiRendered[itemID] == a.aiStreams[itemID] {
 		if a.isWaitingForAI(itemID) {
+			a.ensureWaitingVerb(itemID)
+			a.advanceWaitingFrame(itemID)
 			a.renderAIStream(itemID)
 			a.aiTicking[itemID] = true
 			return a.scheduleAITick(itemID)
@@ -572,15 +537,18 @@ func (a *App) renderAIStream(itemID string) {
 	}
 	buf := a.aiRendered[itemID]
 	completed := a.aiCompleted[itemID] && a.aiRendered[itemID] == a.aiStreams[itemID]
-	line := label + ": " + buf
+	item := TranscriptItem{ID: itemID, Kind: label, Text: buf, Final: completed}
 	if label == aiTypeWaiting && !completed {
-		line = aiTypeWaiting + ": " + a.nextIcon(itemID) + " Thinking"
+		item.Status = a.waitingStatus(itemID)
+	}
+	if label == aiTypeResponse && !completed && a.aiRendered[itemID] == a.aiStreams[itemID] {
+		item.Status = a.waitingStatus(itemID)
 	}
 	focus := a.shouldFollowHistory(itemID)
 	if idx, ok := a.aiIndexes[itemID]; ok {
-		a.history.UpdateMessageAtWithFocus(idx, line, focus)
+		a.history.UpdateItemAt(idx, item, focus)
 	} else {
-		idx := a.history.AppendMessageWithFocus(line, focus)
+		idx := a.history.AppendItem(item, focus)
 		a.aiIndexes[itemID] = idx
 	}
 }
@@ -590,33 +558,56 @@ func (a *App) finalizeAIStream(itemID string) {
 	if !ok {
 		return
 	}
-	final := label + ": " + a.aiRendered[itemID]
+	final := TranscriptItem{ID: itemID, Kind: label, Text: a.aiRendered[itemID], Final: true}
 	focus := a.shouldFollowHistory(itemID)
 	if idx, ok := a.aiIndexes[itemID]; ok {
-		a.history.UpdateMessageAtWithFocus(idx, final, focus)
+		a.history.UpdateItemAt(idx, final, focus)
 	}
-	delete(a.aiIconIdx, itemID)
+	delete(a.aiVerbIdx, itemID)
+	delete(a.aiWaitFrames, itemID)
 	delete(a.aiTypes, itemID)
 	delete(a.aiCompleted, itemID)
 	delete(a.aiTicking, itemID)
 }
 
-func (a *App) shouldFollowHistory(itemID string) bool {
-	idx, ok := a.aiIndexes[itemID]
-	if !ok {
-		return a.activePane != PaneHistory || a.history.cursor >= len(a.history.messages)-1
-	}
-	return a.activePane != PaneHistory || a.history.cursor == idx || a.history.cursor >= len(a.history.messages)-1
+func (a *App) shouldFollowHistory(_ string) bool {
+	return true
 }
 
-func (a *App) nextIcon(itemID string) string {
-	if len(spinnerIcons) == 0 {
-		return ">"
+func (a *App) waitingStatus(itemID string) string {
+	return a.currentVerb(itemID) + " " + a.currentDots(itemID)
+}
+
+func (a *App) currentVerb(itemID string) string {
+	if len(spinnerVerbs) == 0 {
+		return "Thinking"
 	}
-	idx := a.aiIconIdx[itemID]
-	icon := spinnerIcons[idx%len(spinnerIcons)]
-	a.aiIconIdx[itemID] = idx + 1
-	return icon
+	idx := a.aiVerbIdx[itemID] % len(spinnerVerbs)
+	return spinnerVerbs[idx]
+}
+
+func (a *App) currentDots(itemID string) string {
+	if len(spinnerDots) == 0 {
+		return "..."
+	}
+	frame := a.aiWaitFrames[itemID]
+	idx := (frame / 6) % len(spinnerDots)
+	return spinnerDots[idx]
+}
+
+func (a *App) advanceWaitingFrame(itemID string) {
+	frame := a.aiWaitFrames[itemID] + 1
+	a.aiWaitFrames[itemID] = frame
+}
+
+func (a *App) ensureWaitingVerb(itemID string) {
+	if len(spinnerVerbs) == 0 {
+		return
+	}
+	if _, ok := a.aiVerbIdx[itemID]; ok {
+		return
+	}
+	a.aiVerbIdx[itemID] = rand.IntN(len(spinnerVerbs))
 }
 
 func (a *App) startAIThinking(turnID string) tea.Cmd {
@@ -632,6 +623,7 @@ func (a *App) startAIThinking(turnID string) tea.Cmd {
 	if _, ok := a.aiStreams[itemID]; !ok {
 		a.aiStreams[itemID] = ""
 	}
+	a.ensureWaitingVerb(itemID)
 	a.renderAIStream(itemID)
 	if a.aiTicking[itemID] {
 		return nil
@@ -661,9 +653,13 @@ func (a *App) adoptThinkingPlaceholder(turnID, itemID string) {
 		a.aiTicking[itemID] = false
 		delete(a.aiTicking, placeholderID)
 	}
-	if iconIdx, ok := a.aiIconIdx[placeholderID]; ok {
-		a.aiIconIdx[itemID] = iconIdx
-		delete(a.aiIconIdx, placeholderID)
+	if verbIdx, ok := a.aiVerbIdx[placeholderID]; ok {
+		a.aiVerbIdx[itemID] = verbIdx
+		delete(a.aiVerbIdx, placeholderID)
+	}
+	if waitFrames, ok := a.aiWaitFrames[placeholderID]; ok {
+		a.aiWaitFrames[itemID] = waitFrames
+		delete(a.aiWaitFrames, placeholderID)
 	}
 	delete(a.aiTypes, placeholderID)
 	delete(a.aiCompleted, placeholderID)
@@ -712,6 +708,69 @@ func sanitizeHistoryMessage(s string) string {
 	return s
 }
 
+func summarizeToolCall(ev codex.Event) string {
+	name, _ := ev.Payload["name"].(string)
+	text := strings.TrimSpace(sanitizeHistoryMessage(ev.Text))
+	lower := strings.ToLower(name)
+
+	switch lower {
+	case "read":
+		return formatToolSummary("Read", summarizeToolDetail(text))
+	case "glob", "list", "ls":
+		return formatToolSummary("Explored", summarizeToolDetail(text))
+	case "grep", "search":
+		return formatToolSummary("Searched", summarizeToolDetail(text))
+	case "bash", "command", "shell":
+		return formatToolSummary("Ran", firstLine(text))
+	case "write", "edit", "apply_patch", "applypatch":
+		return formatToolSummary("Edited", summarizeToolDetail(text))
+	case "question":
+		return formatToolSummary("Asked", summarizeToolDetail(text))
+	case "task":
+		return formatToolSummary("Delegated", summarizeToolDetail(text))
+	default:
+		if name == "" {
+			return formatToolSummary("Working", summarizeToolDetail(text))
+		}
+		return formatToolSummary(toTitleLabel(name), summarizeToolDetail(text))
+	}
+}
+
+func formatToolSummary(title, detail string) string {
+	title = strings.TrimSpace(title)
+	detail = strings.TrimSpace(detail)
+	if detail == "" {
+		return title
+	}
+	return title + " " + detail
+}
+
+func summarizeToolDetail(s string) string {
+	if s == "" {
+		return ""
+	}
+	line := firstLine(s)
+	if len(line) > 90 {
+		line = line[:87] + "..."
+	}
+	return line
+}
+
+func firstLine(s string) string {
+	if idx := strings.IndexByte(s, '\n'); idx >= 0 {
+		return strings.TrimSpace(s[:idx])
+	}
+	return strings.TrimSpace(s)
+}
+
+func toTitleLabel(s string) string {
+	s = strings.TrimSpace(strings.ReplaceAll(s, "_", " "))
+	if s == "" {
+		return "Working"
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
+}
+
 func (a *App) handleComposeInsertKey(msg tea.KeyMsg) bool {
 	switch msg.Type {
 	case tea.KeyRunes:
@@ -743,28 +802,42 @@ func (a *App) handleComposeInsertKey(msg tea.KeyMsg) bool {
 }
 
 func (a *App) View() string {
-	status := a.statusLine()
 	a.compose.SetActive(a.activePane == PaneCompose)
-	// Keep compose compact (Claude/Opencode-like): target 5 lines including border.
 	composeHeight := 5
 	if a.height > 0 {
-		// Leave room for status line and at least one history line.
-		maxAllowed := max(a.height-2, 3)
+		maxAllowed := max(a.height-1, 3)
 		if composeHeight > maxAllowed {
 			composeHeight = maxAllowed
 		}
 	}
 
-	composeView, composeLines := a.compose.View(a.width, composeHeight)
+	var inputView string
+	var inputLines int
 
-	commandView := ""
-	commandLines := 0
 	if a.mode == ModeCommandLine {
-		commandView = a.command.View()
-		commandLines = strings.Count(commandView, "\n") + 1
+		// In command mode, show the command line instead of compose.
+		sepColor := lipgloss.Color("#4ea4ff")
+		sepStyle := lipgloss.NewStyle().Foreground(sepColor)
+		labelStyled := lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Render(" COMMAND ")
+		labelWidth := lipgloss.Width(labelStyled)
+		dashCount := max(a.width-labelWidth, 0)
+		leftDashes := 2
+		rightDashes := dashCount - leftDashes
+		if rightDashes < 0 {
+			rightDashes = 0
+		}
+		sep := sepStyle.Render(strings.Repeat("─", leftDashes)) + labelStyled + sepStyle.Render(strings.Repeat("─", rightDashes))
+		inputView = sep + "\n" + a.command.View()
+		inputLines = strings.Count(inputView, "\n") + 1
+	} else {
+		inputView, inputLines = a.compose.View(a.width, composeHeight, a.modeLabel())
 	}
 
-	historyHeight := max(a.height-composeLines-1-commandLines, 1)
+	bottomMargin := 3
+	if a.height > 0 && a.height < 15 {
+		bottomMargin = 1
+	}
+	historyHeight := max(a.height-inputLines-bottomMargin, 1)
 
 	a.history.width = a.width
 	a.history.height = historyHeight
@@ -772,17 +845,13 @@ func (a *App) View() string {
 	historyView := a.history.View()
 
 	historyView = padToWidth(historyView, a.width)
-	composeView = padToWidth(composeView, a.width)
-	status = padToWidth(status, a.width)
+	inputView = padToWidth(inputView, a.width)
 
-	if commandView != "" {
-		commandView = padToWidth(commandView, a.width)
-	}
+	// Add bottom margin so compose sits a few lines above the terminal edge.
+	marginPad := strings.Repeat("\n", bottomMargin)
 
-	parts := []string{historyView, composeView, status}
-	if commandView != "" {
-		parts = append(parts, commandView)
-	}
+	parts := []string{historyView, inputView}
+	parts = append(parts, marginPad)
 	frame := lipgloss.JoinVertical(lipgloss.Left, parts...)
 	lines := strings.Count(frame, "\n") + 1
 	if a.height > 0 && lines < a.height {
@@ -808,21 +877,15 @@ func padToWidth(s string, width int) string {
 	return strings.Join(lines, "\n")
 }
 
-func (a *App) statusLine() string {
-	active := "History"
-	if a.activePane == PaneCompose {
-		active = "Compose"
-	}
-	mode := "NORMAL"
+func (a *App) modeLabel() string {
 	switch a.mode {
 	case ModeInsert:
-		mode = "INSERT"
+		return "INSERT"
 	case ModeVisual:
-		mode = "VISUAL"
+		return "VISUAL"
 	case ModeCommandLine:
-		mode = "COMMAND"
+		return "COMMAND"
+	default:
+		return ""
 	}
-
-	parts := []string{active, mode}
-	return lipgloss.NewStyle().Reverse(true).Render(strings.Join(parts, " | "))
 }

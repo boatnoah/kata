@@ -4,12 +4,22 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/boatnoah/kata/internal/codex"
 )
 
 func drainAIStream(app *App, itemID string) {
 	for app.aiTicking[itemID] || app.aiRendered[itemID] != app.aiStreams[itemID] {
 		_ = app.handleAITick(itemID)
 	}
+}
+
+func lastHistoryItem(t *testing.T, app *App) TranscriptItem {
+	t.Helper()
+	if len(app.history.items) == 0 {
+		t.Fatalf("expected history item")
+	}
+	return app.history.items[len(app.history.items)-1]
 }
 
 func TestLeaderFocusCompose(t *testing.T) {
@@ -78,11 +88,15 @@ func TestCommandModeBlockedInInsert(t *testing.T) {
 
 func TestCommandModeCancelRestoresPrevious(t *testing.T) {
 	app := NewApp()
+	app.activePane = PaneCompose
 	app.mode = ModeVisual
+	app.compose.EnterVisual()
 	app.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{':'}})
 	app.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
-	if app.mode != ModeVisual {
-		t.Fatalf("expected to restore visual mode, got %v", app.mode)
+	// enterCommandLine clears compose visual, so exiting command mode
+	// falls back to normal instead of restoring orphaned visual mode.
+	if app.mode != ModeNormal {
+		t.Fatalf("expected to restore normal mode (visual was cleared), got %v", app.mode)
 	}
 }
 
@@ -122,57 +136,46 @@ func TestWriteCommandSendsComposeToHistory(t *testing.T) {
 	if got := app.compose.Content(); got != "" {
 		t.Fatalf("expected compose to clear after write, got %q", got)
 	}
-	if len(app.history.messages) == 0 || app.history.messages[len(app.history.messages)-1] != "User: hello world" {
-		t.Fatalf("expected history to include written message, got last %q", app.history.messages[len(app.history.messages)-1])
+	item := lastHistoryItem(t, app)
+	if item.Kind != TranscriptUser || item.Text != "hello world" {
+		t.Fatalf("expected user transcript item, got %+v", item)
 	}
 }
 
 func TestUpsertAIStreamPreservesDeltaSpacing(t *testing.T) {
 	app := NewApp()
 
-	app.upsertAIStream("item-1", "AI", "Hello", false)
-	app.upsertAIStream("item-1", "AI", " there", false)
-	app.upsertAIStream("item-1", "AI", " friend", false)
-	app.upsertAIStream("item-1", "AI", "", true)
+	app.upsertAIStream("item-1", TranscriptAssistant, "Hello", false)
+	app.upsertAIStream("item-1", TranscriptAssistant, " there", false)
+	app.upsertAIStream("item-1", TranscriptAssistant, " friend", false)
+	app.upsertAIStream("item-1", TranscriptAssistant, "", true)
 	drainAIStream(app, "item-1")
 
-	if got := app.history.messages[len(app.history.messages)-1]; got != "AI: Hello there friend" {
-		t.Fatalf("expected spaced final AI message, got %q", got)
+	item := lastHistoryItem(t, app)
+	if item.Kind != TranscriptAssistant || item.Text != "Hello there friend" {
+		t.Fatalf("expected spaced final AI message, got %+v", item)
 	}
 }
 
 func TestUpsertAIStreamCompletedUsesAuthoritativeFinalText(t *testing.T) {
 	app := NewApp()
 
-	app.upsertAIStream("item-1", "AI", "Hi! ", false)
-	app.upsertAIStream("item-1", "AI", "I'm here.", false)
-	app.upsertAIStream("item-1", "AI", "Hi! I'm here.", true)
+	app.upsertAIStream("item-1", TranscriptAssistant, "Hi! ", false)
+	app.upsertAIStream("item-1", TranscriptAssistant, "I'm here.", false)
+	app.upsertAIStream("item-1", TranscriptAssistant, "Hi! I'm here.", true)
 	drainAIStream(app, "item-1")
 
-	if got := app.history.messages[len(app.history.messages)-1]; got != "AI: Hi! I'm here." {
-		t.Fatalf("expected final AI message without duplication, got %q", got)
+	item := lastHistoryItem(t, app)
+	if item.Kind != TranscriptAssistant || item.Text != "Hi! I'm here." {
+		t.Fatalf("expected final AI message without duplication, got %+v", item)
 	}
 }
 
-func TestUpsertAIStreamDoesNotForceHistoryFollow(t *testing.T) {
-	app := NewApp()
-	app.history.AppendMessage("older")
-	app.history.AppendMessage("newer")
-	app.activePane = PaneHistory
-	app.history.cursor = 0
-
-	app.upsertAIStream("item-1", "AI", "hello", false)
-	drainAIStream(app, "item-1")
-
-	if app.history.cursor != 0 {
-		t.Fatalf("expected history cursor to stay on older entry, got %d", app.history.cursor)
-	}
-}
 
 func TestUpsertAIStreamRevealsTextProgressively(t *testing.T) {
 	app := NewApp()
 
-	app.upsertAIStream("item-1", "AI", "abcdef", false)
+	app.upsertAIStream("item-1", TranscriptAssistant, "abcdef", false)
 
 	if got := app.aiRendered["item-1"]; got == app.aiStreams["item-1"] {
 		t.Fatalf("expected rendered text to lag behind full stream, got %q", got)
@@ -182,3 +185,44 @@ func TestUpsertAIStreamRevealsTextProgressively(t *testing.T) {
 		t.Fatalf("expected full rendered text after ticks, got %q", got)
 	}
 }
+
+func TestRenderAIStreamShowsWaitingStatusWhenCaughtUp(t *testing.T) {
+	app := NewApp()
+	app.aiTypes["item-1"] = TranscriptAssistant
+	app.aiStreams["item-1"] = "hello"
+	app.aiRendered["item-1"] = "hello"
+
+	app.renderAIStream("item-1")
+
+	item := lastHistoryItem(t, app)
+	if item.Kind != TranscriptAssistant || item.Text != "hello" || item.Status == "" {
+		t.Fatalf("expected assistant item with waiting status, got %+v", item)
+	}
+}
+
+func TestSummarizeToolCallCollapsesReadActivity(t *testing.T) {
+	ev := codex.Event{
+		Payload: map[string]any{"name": "read"},
+		Text:    "go.mod\nmodule github.com/boatnoah/kata\n",
+	}
+
+	got := summarizeToolCall(ev)
+	if got != "Read go.mod" {
+		t.Fatalf("expected compact read summary, got %q", got)
+	}
+}
+
+func TestHandleCodexEventSkipsCommandOutput(t *testing.T) {
+	app := NewApp()
+	before := len(app.history.items)
+
+	cmd := app.handleCodexEvent(codex.Event{Type: codex.EventCommandOutput, ItemID: "cmd-1", Text: "package main\nfunc main() {}"})
+
+	if cmd != nil {
+		t.Fatalf("expected no command output render cmd, got %v", cmd)
+	}
+	if len(app.history.items) != before {
+		t.Fatalf("expected command output to be suppressed")
+	}
+}
+

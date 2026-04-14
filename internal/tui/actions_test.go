@@ -14,15 +14,11 @@ func TestCtrlINotBoundToSwitch(t *testing.T) {
 	}
 }
 
-func TestPlainJKStillNavigate(t *testing.T) {
+func TestHistoryPaneHasNoVimBindings(t *testing.T) {
 	bindings := defaultBindings()
 	j := keystrokeFromMsg(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
-	if action, ok := findBinding(bindings, PaneHistory, ModeNormal, j); !ok || action != ActionMoveDown {
-		t.Fatalf("plain j should move down, got %v, ok=%v", action, ok)
-	}
-	k := keystrokeFromMsg(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
-	if action, ok := findBinding(bindings, PaneHistory, ModeNormal, k); !ok || action != ActionMoveUp {
-		t.Fatalf("plain k should move up, got %v, ok=%v", action, ok)
+	if _, ok := findBinding(bindings, PaneHistory, ModeNormal, j); ok {
+		t.Fatalf("history pane should not have j binding")
 	}
 }
 
