@@ -385,9 +385,24 @@ func (h *HistoryScreen) ExitVisual() {
 // VisualActive reports whether a visual selection is currently in progress.
 func (h *HistoryScreen) VisualActive() bool { return h.visualActive }
 
-// YankSelection copies the underlying item text for the items whose rendered
-// lines overlap the current selection. Items are joined with a blank line so
-// multi-message yanks paste cleanly. Clears the selection; cursor stays put.
+// YankCurrentLine copies the single rendered line under the cursor, stripped
+// of ANSI styling and leading indent. This is the vim `yy` motion in CHAT
+// scope — grab exactly what the cursor is sitting on.
+func (h *HistoryScreen) YankCurrentLine() {
+	lines := h.renderedLines()
+	if h.cursorLine < 0 || h.cursorLine >= len(lines) {
+		return
+	}
+	plain := strings.TrimLeft(stripANSIForLayout(lines[h.cursorLine].text), " ")
+	if plain == "" {
+		return
+	}
+	copyToClipboard(plain)
+}
+
+// YankSelection copies the rendered lines covered by the current selection,
+// stripped of ANSI styling and the 2-col indent. Line-wise: whatever is
+// highlighted is what gets yanked — no item-level expansion.
 func (h *HistoryScreen) YankSelection() {
 	lo, hi, ok := h.selectionRange()
 	if !ok {
@@ -404,29 +419,16 @@ func (h *HistoryScreen) YankSelection() {
 		h.ExitVisual()
 		return
 	}
-	seen := map[int]bool{}
-	var order []int
+	out := make([]string, 0, hi-lo+1)
 	for i := lo; i <= hi; i++ {
-		idx := lines[i].itemIndex
-		if idx < 0 || idx >= len(h.items) {
-			continue
-		}
-		if seen[idx] {
-			continue
-		}
-		seen[idx] = true
-		order = append(order, idx)
+		out = append(out, strings.TrimLeft(stripANSIForLayout(lines[i].text), " "))
 	}
-	parts := make([]string, 0, len(order))
-	for _, idx := range order {
-		t := strings.TrimRight(h.items[idx].Text, "\n")
-		if t == "" {
-			continue
-		}
-		parts = append(parts, t)
+	// Trim trailing blank lines so the clipboard doesn't carry padding.
+	for len(out) > 0 && strings.TrimSpace(out[len(out)-1]) == "" {
+		out = out[:len(out)-1]
 	}
-	if len(parts) > 0 {
-		copyToClipboard(strings.Join(parts, "\n\n"))
+	if len(out) > 0 {
+		copyToClipboard(strings.Join(out, "\n"))
 	}
 	h.ExitVisual()
 }

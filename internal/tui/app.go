@@ -27,6 +27,8 @@ type App struct {
 	bindings           []Binding
 	leaderPending      bool
 	deletePending      bool
+	gPending           bool
+	yPending           bool
 	statusNotice       string
 	width              int
 	height             int
@@ -159,6 +161,32 @@ func (a *App) handleKey(msg tea.KeyMsg) tea.Cmd {
 	if a.activePane == PaneCompose && a.mode == ModeNormal {
 		if msg.Type == tea.KeyRunes && string(msg.Runes) == "d" {
 			a.deletePending = true
+			return nil
+		}
+	}
+
+	// History chords: gg → top, yy → yank current item (CHAT scope).
+	if a.activePane == PaneHistory && a.mode == ModeNormal && a.gPending {
+		a.gPending = false
+		if msg.Type == tea.KeyRunes && string(msg.Runes) == "g" {
+			a.history.CursorTop()
+			return nil
+		}
+	}
+	if a.activePane == PaneHistory && a.mode == ModeNormal && a.yPending {
+		a.yPending = false
+		if msg.Type == tea.KeyRunes && string(msg.Runes) == "y" {
+			a.history.YankCurrentLine()
+			return nil
+		}
+	}
+	if a.activePane == PaneHistory && a.mode == ModeNormal && msg.Type == tea.KeyRunes {
+		switch string(msg.Runes) {
+		case "g":
+			a.gPending = true
+			return nil
+		case "y":
+			a.yPending = true
 			return nil
 		}
 	}

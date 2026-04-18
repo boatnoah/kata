@@ -297,6 +297,85 @@ func TestAppViewStableAtHistoryTop(t *testing.T) {
 	}
 }
 
+// gg in history normal mode jumps to the first rendered line.
+func TestHistoryChordGGJumpsToTop(t *testing.T) {
+	app := NewApp()
+	app.width = 60
+	app.height = 20
+	for i := 0; i < 10; i++ {
+		app.history.AppendItem(TranscriptItem{Kind: TranscriptAssistant, Text: "line"}, true)
+	}
+	// Focus history.
+	app.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	app.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	if app.activePane != PaneHistory {
+		t.Fatalf("setup: expected history focus")
+	}
+	// First g arms the chord, second g fires.
+	app.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	if !app.gPending {
+		t.Fatalf("expected gPending after first g")
+	}
+	app.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	if app.history.cursorLine != 0 {
+		t.Fatalf("expected cursorLine=0 after gg, got %d", app.history.cursorLine)
+	}
+	if app.gPending {
+		t.Fatalf("expected gPending cleared")
+	}
+}
+
+// A single g followed by a different key should not jump — the chord aborts.
+func TestHistoryChordGSingleTapAborts(t *testing.T) {
+	app := NewApp()
+	app.width = 60
+	app.height = 20
+	for i := 0; i < 10; i++ {
+		app.history.AppendItem(TranscriptItem{Kind: TranscriptAssistant, Text: "line"}, true)
+	}
+	app.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	app.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	app.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	// Cancel with j (move down) — cursor should NOT be at top.
+	app.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	if app.gPending {
+		t.Fatalf("expected gPending cleared after non-g follow-up")
+	}
+	if app.history.cursorLine == 0 {
+		t.Fatalf("expected no top-jump from single g")
+	}
+}
+
+// yy fires without entering visual mode and leaves no lingering selection.
+func TestHistoryChordYYFiresInNormalMode(t *testing.T) {
+	app := NewApp()
+	app.width = 60
+	app.height = 20
+	app.history.AppendItem(TranscriptItem{Kind: TranscriptUser, Text: "first"}, true)
+	app.history.AppendItem(TranscriptItem{Kind: TranscriptAssistant, Text: "second"}, true)
+	app.history.AppendItem(TranscriptItem{Kind: TranscriptUser, Text: "third"}, true)
+
+	app.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	app.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	// Cursor starts at bottom — EnsureCursor pinned to last line (item 2).
+	app.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if !app.yPending {
+		t.Fatalf("expected yPending after first y")
+	}
+	app.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if app.yPending {
+		t.Fatalf("expected yPending cleared after yy")
+	}
+	// We can't assert clipboard content portably here — just ensure mode is
+	// unchanged and no visual selection was created.
+	if app.mode != ModeNormal {
+		t.Fatalf("expected normal mode after yy, got %v", app.mode)
+	}
+	if app.history.VisualActive() {
+		t.Fatalf("expected no visual selection after yy")
+	}
+}
+
 func TestHandleCodexEventSkipsCommandOutput(t *testing.T) {
 	app := NewApp()
 	before := len(app.history.items)
