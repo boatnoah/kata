@@ -4,7 +4,27 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/charmbracelet/lipgloss"
 )
+
+// Every row of the compose box must be exactly `width` display cells wide so
+// that the box aligns flush with the statusline. Off-by-one in the body-row
+// padding used to push the right `│` past the `╮`/`╯` corners.
+func TestComposeViewRowsMatchWidth(t *testing.T) {
+	c := NewCompose()
+	c.SetActive(true)
+	c.buf = []rune("hi")
+	c.cursor = len(c.buf)
+
+	view, _ := c.View(80, 5, "")
+	for i, row := range strings.Split(view, "\n") {
+		w := lipgloss.Width(row)
+		if w != 80 {
+			t.Fatalf("row %d width=%d, want 80: %q", i, w, row)
+		}
+	}
+}
 
 func TestComposeViewCapsHeight(t *testing.T) {
 	c := NewCompose()

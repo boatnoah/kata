@@ -522,11 +522,12 @@ func (c *Compose) View(width int, targetLines int, modeLabel string) (string, in
 		} else {
 			b.WriteString("  ")
 		}
-		// Pad the interior to innerCols − 1 (minus leading space) so the
-		// right border lines up on every row, even for empty/short lines.
+		// The interior between `│` bars is innerCols wide and laid out as:
+		//   ' ' + prefix(2) + content(want) + ' '  →  want = innerCols − 4
+		// so the right border lines up with the top/bot corners.
 		rendered := line
 		renderedWidth := lipgloss.Width(rendered)
-		want := innerCols - 1 - 2 // minus leading space + "❯ " / "  " prefix
+		want := innerCols - 4 // leading ' ' + "❯ "/"  " + trailing ' '
 		if want < 0 {
 			want = 0
 		}
