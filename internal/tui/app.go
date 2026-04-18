@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"time"
@@ -28,6 +30,13 @@ type App struct {
 	statusNotice       string
 	width              int
 	height             int
+	theme              Theme
+	sessionID          string
+	branch             string
+	model              string
+	title              string
+	ctxUsed            int
+	ctxTotal           int
 	ai                 *AIManager
 	aiStreams          map[string]string
 	aiRendered         map[string]string
@@ -56,7 +65,7 @@ var spinnerVerbs = []string{"Thinking", "Reasoning", "Inspecting"}
 var spinnerDots = []string{".", "..", "..."}
 
 func NewApp() *App {
-	return &App{
+	a := &App{
 		mode:               ModeNormal,
 		prevMode:           ModeNormal,
 		activePane:         PaneCompose,
@@ -64,6 +73,11 @@ func NewApp() *App {
 		compose:            NewCompose(),
 		command:            NewCommandLine(),
 		bindings:           defaultBindings(),
+		theme:              DefaultTheme(),
+		sessionID:          newSessionID(),
+		branch:             detectBranch(),
+		model:              "sonnet-4.5",
+		ctxTotal:           200_000,
 		ai:                 newAIManager(),
 		aiStreams:          make(map[string]string),
 		aiRendered:         make(map[string]string),
@@ -75,6 +89,30 @@ func NewApp() *App {
 		aiTicking:          make(map[string]bool),
 		aiTurnPlaceholders: make(map[string]string),
 	}
+	a.compose.SetTheme(a.theme)
+	a.history.SetTheme(a.theme)
+	return a
+}
+
+// newSessionID returns a short, terminal-friendly id like "4f2a". Reusing
+// the existing rand/v2 dependency keeps the process lightweight.
+func newSessionID() string {
+	const alphabet = "0123456789abcdef"
+	b := make([]byte, 4)
+	for i := range b {
+		b[i] = alphabet[rand.IntN(len(alphabet))]
+	}
+	return string(b)
+}
+
+// detectBranch returns the current git branch if discoverable, else "".
+// Cheap best-effort via `git rev-parse --abbrev-ref HEAD`.
+func detectBranch() string {
+	out, err := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 var _ tea.Model = (*App)(nil)
@@ -302,6 +340,18 @@ func (a *App) applyAction(action ActionID) tea.Cmd {
 		if a.activePane == PaneCompose {
 			a.compose.DeleteCurrentLine()
 		}
+	case ActionScrollUp:
+		a.history.ScrollUp(1)
+	case ActionScrollDown:
+		a.history.ScrollDown(1)
+	case ActionScrollHalfPageUp:
+		a.history.ScrollHalfPageUp()
+	case ActionScrollHalfPageDown:
+		a.history.ScrollHalfPageDown()
+	case ActionScrollTop:
+		a.history.ScrollToTop()
+	case ActionScrollBottom:
+		a.history.ScrollToBottom()
 	}
 
 	// Enforce mode compatibility if we changed panes or modes.
@@ -346,8 +396,9 @@ func (a *App) runCommand(input string) tea.Cmd {
 
 	fields := strings.Fields(trimmed)
 	name := strings.ToLower(fields[0])
+	args := fields[1:]
 	switch name {
-	case "q":
+	case "q", "q!":
 		a.exitCommandLine()
 		return tea.Quit
 	case "w":
@@ -359,12 +410,82 @@ func (a *App) runCommand(input string) tea.Cmd {
 		}
 		a.history.AppendItem(TranscriptItem{Kind: TranscriptUser, Text: message}, true)
 		return a.sendToAI(message)
-	default:
-		// Unknown command: exit command mode quietly.
+	case "wq":
 		a.exitCommandLine()
-		_ = fields
-		return nil
+		message := a.compose.Content()
+		a.compose.Reset()
+		var cmds []tea.Cmd
+		if strings.TrimSpace(message) != "" {
+			a.history.AppendItem(TranscriptItem{Kind: TranscriptUser, Text: message}, true)
+			cmds = append(cmds, a.sendToAI(message))
+		}
+		cmds = append(cmds, tea.Quit)
+		return tea.Batch(cmds...)
+	case "clear":
+		a.exitCommandLine()
+		a.history.items = nil
+		a.history.invalidateLines()
+		a.flashStatus("cleared")
+		return a.clearStatusAfter(2 * time.Second)
+	case "new":
+		a.exitCommandLine()
+		a.history.items = nil
+		a.history.invalidateLines()
+		a.compose.Reset()
+		a.sessionID = newSessionID()
+		a.flashStatus("new session · " + a.sessionID)
+		return a.clearStatusAfter(2 * time.Second)
+	case "colorscheme", "colo":
+		a.exitCommandLine()
+		if len(args) == 0 {
+			a.flashStatus("usage: :colorscheme " + strings.Join(ThemeNames(), "|"))
+			return a.clearStatusAfter(3 * time.Second)
+		}
+		if theme, ok := ThemeByName(args[0]); ok {
+			a.theme = theme
+			a.compose.SetTheme(theme)
+			a.history.SetTheme(theme)
+			a.flashStatus(":colorscheme " + args[0])
+		} else {
+			a.flashStatus("E185: cannot find color scheme '" + args[0] + "'")
+		}
+		return a.clearStatusAfter(2 * time.Second)
+	case "model":
+		a.exitCommandLine()
+		if len(args) == 0 {
+			a.flashStatus("current model: " + a.model)
+		} else {
+			a.model = args[0]
+			a.flashStatus("model → " + a.model)
+		}
+		return a.clearStatusAfter(2 * time.Second)
+	case "help":
+		a.exitCommandLine()
+		a.flashStatus("keys: i insert · : cmd · j/k scroll · gg/G top/bot · esc normal · :w send · :q quit")
+		return a.clearStatusAfter(4 * time.Second)
+	case "sess":
+		a.exitCommandLine()
+		a.flashStatus("session picker not yet implemented")
+		return a.clearStatusAfter(2 * time.Second)
+	case "diff":
+		a.exitCommandLine()
+		a.flashStatus("diff overlay not yet implemented")
+		return a.clearStatusAfter(2 * time.Second)
+	default:
+		a.exitCommandLine()
+		a.flashStatus("E492: not a kata command: " + name)
+		return a.clearStatusAfter(3 * time.Second)
 	}
+}
+
+// flashStatus sets a transient status-line notice.
+func (a *App) flashStatus(msg string) {
+	a.statusNotice = msg
+}
+
+// clearStatusAfter returns a command that clears statusNotice after d.
+func (a *App) clearStatusAfter(d time.Duration) tea.Cmd {
+	return tea.Tick(d, func(time.Time) tea.Msg { return clearStatusMsg{} })
 }
 
 func (a *App) switchPane() {
@@ -420,7 +541,7 @@ func (a *App) handleCodexEvent(ev codex.Event) tea.Cmd {
 		a.adoptThinkingPlaceholder(ev.TurnID, ev.ItemID)
 		return a.upsertAIStream(ev.ItemID, aiTypeResponse, ev.Text, true)
 	case codex.EventToolCall:
-		return a.upsertAIStream(ev.ItemID, TranscriptTool, summarizeToolCall(ev), false)
+		return a.setToolCallSummary(ev.ItemID, summarizeToolCall(ev))
 	case codex.EventCommandOutput:
 		return nil
 	case codex.EventTurnCompleted:
@@ -442,6 +563,20 @@ func (a *App) handleCodexEvent(ev codex.Event) tea.Cmd {
 			}
 		}
 	}
+	return nil
+}
+
+// setToolCallSummary writes a tool-call summary as a complete item, replacing
+// any prior summary for the same ID. Tool calls don't animate and don't
+// accumulate deltas — the latest summary wins and the item is finalized.
+func (a *App) setToolCallSummary(itemID, summary string) tea.Cmd {
+	summary = sanitizeHistoryMessage(summary)
+	a.aiTypes[itemID] = TranscriptTool
+	a.aiStreams[itemID] = summary
+	a.aiRendered[itemID] = summary
+	a.aiCompleted[itemID] = true
+	a.renderAIStream(itemID)
+	a.finalizeAIStream(itemID)
 	return nil
 }
 
@@ -803,9 +938,17 @@ func (a *App) handleComposeInsertKey(msg tea.KeyMsg) bool {
 
 func (a *App) View() string {
 	a.compose.SetActive(a.activePane == PaneCompose)
-	composeHeight := 5
+
+	// Compose height = borders (2) + body lines, clamped.
+	composeHeight := a.compose.BodyLineCount(a.width) + 2
+	if composeHeight < 3 {
+		composeHeight = 3
+	}
+	if composeHeight > 10 {
+		composeHeight = 10
+	}
 	if a.height > 0 {
-		maxAllowed := max(a.height-1, 3)
+		maxAllowed := max(a.height-3, 3) // leave room for topbar + statusline + some history
 		if composeHeight > maxAllowed {
 			composeHeight = maxAllowed
 		}
@@ -815,29 +958,18 @@ func (a *App) View() string {
 	var inputLines int
 
 	if a.mode == ModeCommandLine {
-		// In command mode, show the command line instead of compose.
-		sepColor := lipgloss.Color("#4ea4ff")
-		sepStyle := lipgloss.NewStyle().Foreground(sepColor)
-		labelStyled := lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Render(" COMMAND ")
-		labelWidth := lipgloss.Width(labelStyled)
-		dashCount := max(a.width-labelWidth, 0)
-		leftDashes := 2
-		rightDashes := dashCount - leftDashes
-		if rightDashes < 0 {
-			rightDashes = 0
-		}
-		sep := sepStyle.Render(strings.Repeat("─", leftDashes)) + labelStyled + sepStyle.Render(strings.Repeat("─", rightDashes))
-		inputView = sep + "\n" + a.command.View()
+		inputView = a.renderCommandInput()
 		inputLines = strings.Count(inputView, "\n") + 1
 	} else {
 		inputView, inputLines = a.compose.View(a.width, composeHeight, a.modeLabel())
 	}
 
-	bottomMargin := 3
-	if a.height > 0 && a.height < 15 {
-		bottomMargin = 1
-	}
-	historyHeight := max(a.height-inputLines-bottomMargin, 1)
+	topbar := renderTopbar(a.chromeSnapshot())
+	statusline := renderStatusline(a.chromeSnapshot())
+
+	// History fills everything between topbar and input + statusline.
+	// Reserve 1 row each for topbar and statusline.
+	historyHeight := max(a.height-inputLines-2, 1)
 
 	a.history.width = a.width
 	a.history.height = historyHeight
@@ -846,12 +978,10 @@ func (a *App) View() string {
 
 	historyView = padToWidth(historyView, a.width)
 	inputView = padToWidth(inputView, a.width)
+	topbar = padToWidth(topbar, a.width)
+	statusline = padToWidth(statusline, a.width)
 
-	// Add bottom margin so compose sits a few lines above the terminal edge.
-	marginPad := strings.Repeat("\n", bottomMargin)
-
-	parts := []string{historyView, inputView}
-	parts = append(parts, marginPad)
+	parts := []string{topbar, historyView, inputView, statusline}
 	frame := lipgloss.JoinVertical(lipgloss.Left, parts...)
 	lines := strings.Count(frame, "\n") + 1
 	if a.height > 0 && lines < a.height {
@@ -859,6 +989,73 @@ func (a *App) View() string {
 		frame += padding
 	}
 	return frame
+}
+
+// renderCommandInput paints the ":…" prompt row shown while command mode
+// is active. It mimics the compose frame height (3 rows) so the statusline
+// doesn't jitter between modes.
+func (a *App) renderCommandInput() string {
+	theme := a.theme
+	borderStyle := lipgloss.NewStyle().Foreground(theme.ModeColor(ModeCommandLine))
+	innerCols := max(a.width-2, 1)
+	top := borderStyle.Render("╭" + strings.Repeat("─", innerCols) + "╮")
+	bot := borderStyle.Render("╰" + strings.Repeat("─", innerCols) + "╯")
+
+	cmdView := a.command.View() // starts with ":"
+	cmdView = lipgloss.NewStyle().Foreground(theme.FgBright).Render(cmdView)
+	// The command view itself contains an ANSI cursor; pad to innerCols−2
+	// so the right border sits flush.
+	cmdWidth := lipgloss.Width(cmdView)
+	want := innerCols - 2
+	if want < 0 {
+		want = 0
+	}
+	pad := ""
+	if cmdWidth < want {
+		pad = strings.Repeat(" ", want-cmdWidth)
+	}
+	row := borderStyle.Render("│") + " " + cmdView + pad + " " + borderStyle.Render("│")
+	return top + "\n" + row + "\n" + bot
+}
+
+// chromeSnapshot collects the fields renderTopbar / renderStatusline need.
+func (a *App) chromeSnapshot() chromeSnapshot {
+	cwd, _ := os.Getwd()
+	return chromeSnapshot{
+		theme:     a.theme,
+		width:     a.width,
+		path:      shortPath(cwd),
+		title:     a.title,
+		sessionID: a.sessionID,
+		mode:      a.mode,
+		scope:     a.scopeLabel(),
+		branch:    a.branch,
+		model:     a.model,
+		ctxUsed:   a.ctxUsed,
+		ctxTotal:  a.ctxTotal,
+		msgCount:  len(a.history.items),
+		notice:    a.statusNotice,
+		lineCol:   a.lineColLabel(),
+	}
+}
+
+// scopeLabel returns the statusline scope label. History pane uses CHAT,
+// compose pane uses PROMPT — the design's two-scope indicator.
+func (a *App) scopeLabel() string {
+	if a.activePane == PaneHistory {
+		return "CHAT"
+	}
+	return "PROMPT"
+}
+
+// lineColLabel reports a vim-style line:col indicator for the compose
+// buffer when that's the active pane.
+func (a *App) lineColLabel() string {
+	if a.activePane != PaneCompose {
+		return ""
+	}
+	line, col := a.compose.lineAndColumn()
+	return fmt.Sprintf("%d:%d", line+1, col)
 }
 
 // padToWidth ensures every line is space-padded to the given width so that

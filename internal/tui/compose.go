@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -19,10 +18,25 @@ type Compose struct {
 	visualAnchor int
 	yankBuf      []rune
 	active       bool
+	theme        Theme
 }
 
 func NewCompose() *Compose {
-	return &Compose{col: -1}
+	return &Compose{col: -1, theme: DefaultTheme()}
+}
+
+// SetTheme swaps the palette used to paint the prompt chrome.
+func (c *Compose) SetTheme(t Theme) {
+	c.theme = t
+}
+
+// currentMode derives the effective mode for painting the prompt frame.
+// Visual and Insert dominate when active; otherwise Normal.
+func (c *Compose) currentMode(fallback Mode) Mode {
+	if c.visualActive {
+		return ModeVisual
+	}
+	return fallback
 }
 
 // Content returns the current compose buffer as a string.
@@ -399,24 +413,55 @@ func (c *Compose) OpenAbove() {
 	c.clearVisual()
 }
 
-// View renders the compose buffer with a visible cursor.
-// targetLines limits the total rendered height. Pass 0 for no limit.
-// modeLabel is embedded in the separator line (e.g. "INSERT", "VISUAL", or "" for normal).
-// It returns the rendered string and its line count.
+// BodyLineCount returns the number of wrapped display lines the compose body
+// currently occupies at the given pane width. Used by the app layout to size
+// the compose pane dynamically (border + body). Returns at least 1.
+func (c *Compose) BodyLineCount(width int) int {
+	innerWidth := c.innerWidth(width)
+	lines := composeWrappedLines(c.renderWithCursor(), innerWidth)
+	if len(lines) == 0 {
+		return 1
+	}
+	return len(lines)
+}
+
+// innerWidth computes the text column budget inside the bordered prompt box.
+// Budget = width − (2 border cols + 1 pad col on each side + 2 cols for
+// "❯ " prefix) = width − 6. Falls back to 1 when clamped very narrow.
+func (c *Compose) innerWidth(width int) int {
+	if width <= 0 {
+		return 0
+	}
+	iw := width - promptFrameOverhead
+	if iw < 1 {
+		iw = 1
+	}
+	return iw
+}
+
+// promptFrameOverhead is the number of display cells consumed by the
+// bordered prompt row that are NOT available for the user's text:
+//   • 2 columns for the left + right border (│ … │)
+//   • 2 columns of inner padding (one each side)
+//   • 2 columns for the "❯ " prefix on the first line / "  " on wraps
+const promptFrameOverhead = 6
+
+// View renders the compose buffer inside a bordered prompt row with a
+// mode-colored border and a `❯` marker. When command mode is active the
+// caller uses a different view; this function ignores the modeLabel arg
+// (kept for signature stability) and paints the border based on the app's
+// mode.
+//
+// targetLines bounds the total rendered height (including borders). Pass 0
+// for no limit. Returns the rendered string and its line count.
 func (c *Compose) View(width int, targetLines int, modeLabel string) (string, int) {
 	content := c.renderWithCursor()
-	innerWidth := 0
-	if width > 0 {
-		innerWidth = width - 4 // account for "> " prefix + padding
-		if innerWidth < 1 {
-			innerWidth = 1
-		}
-	}
+	innerWidth := c.innerWidth(width)
 	bodyLines := composeWrappedLines(content, innerWidth)
 
-	// Cap visible lines to keep cursor visible.
+	// Cap visible body lines to keep cursor visible. Borders take 2 rows.
 	if targetLines > 0 {
-		available := targetLines - 1 // 1 line for separator
+		available := targetLines - 2
 		if available < 1 {
 			available = 1
 		}
@@ -438,46 +483,85 @@ func (c *Compose) View(width int, targetLines int, modeLabel string) (string, in
 		}
 	}
 
-	// Build output: separator line (with optional mode label) + prompt-prefixed body.
-	var b strings.Builder
-	sepColor := lipgloss.Color("#444444")
+	mode := c.resolveMode(modeLabel)
+	borderColor := c.theme.Border
 	if c.active {
-		sepColor = lipgloss.Color("#4ea4ff")
+		borderColor = c.theme.ModeColor(mode)
 	}
-	sepStyle := lipgloss.NewStyle().Foreground(sepColor)
+	borderStyle := lipgloss.NewStyle().Foreground(borderColor)
+	markerColor := c.theme.Accent
+	if c.active {
+		markerColor = c.theme.ModeColor(mode)
+	}
+	markerStyle := lipgloss.NewStyle().Foreground(markerColor).Bold(true)
 
-	if modeLabel != "" {
-		labelStyled := lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Render(" " + modeLabel + " ")
-		labelWidth := lipgloss.Width(labelStyled)
-		dashCount := max(width-labelWidth, 0)
-		leftDashes := 2
-		rightDashes := dashCount - leftDashes
-		if rightDashes < 0 {
-			rightDashes = 0
-		}
-		b.WriteString(sepStyle.Render(strings.Repeat("─", leftDashes)))
-		b.WriteString(labelStyled)
-		b.WriteString(sepStyle.Render(strings.Repeat("─", rightDashes)))
-	} else {
-		b.WriteString(sepStyle.Render(strings.Repeat("─", max(width, 1))))
+	// Build a rounded box: ╭── … ──╮ / │ ❯ … │ / ╰── … ──╯
+	innerCols := 0
+	if width > 2 {
+		innerCols = width - 2 // cols between the two vertical borders
 	}
+	if innerCols < 1 {
+		innerCols = 1
+	}
+	top := "╭" + strings.Repeat("─", innerCols) + "╮"
+	bot := "╰" + strings.Repeat("─", innerCols) + "╯"
+
+	var b strings.Builder
+	b.WriteString(borderStyle.Render(top))
 	b.WriteRune('\n')
 
-	prompt := lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Bold(true).Render(">")
+	if len(bodyLines) == 0 {
+		bodyLines = []string{""}
+	}
 	for i, line := range bodyLines {
+		b.WriteString(borderStyle.Render("│"))
+		b.WriteRune(' ')
 		if i == 0 {
-			fmt.Fprintf(&b, "%s %s", prompt, line)
+			b.WriteString(markerStyle.Render("❯"))
+			b.WriteRune(' ')
 		} else {
-			fmt.Fprintf(&b, "  %s", line)
+			b.WriteString("  ")
 		}
+		// Pad the interior to innerCols − 1 (minus leading space) so the
+		// right border lines up on every row, even for empty/short lines.
+		rendered := line
+		renderedWidth := lipgloss.Width(rendered)
+		want := innerCols - 1 - 2 // minus leading space + "❯ " / "  " prefix
+		if want < 0 {
+			want = 0
+		}
+		if renderedWidth < want {
+			rendered += strings.Repeat(" ", want-renderedWidth)
+		}
+		b.WriteString(rendered)
+		b.WriteRune(' ')
+		b.WriteString(borderStyle.Render("│"))
 		if i < len(bodyLines)-1 {
 			b.WriteRune('\n')
 		}
 	}
+	b.WriteRune('\n')
+	b.WriteString(borderStyle.Render(bot))
 
 	result := b.String()
 	lineCount := strings.Count(result, "\n") + 1
 	return result, lineCount
+}
+
+// resolveMode maps an optional text modeLabel back to a Mode so the border
+// can color-match. It accepts the legacy labels the app passes in ("INSERT",
+// "VISUAL", "COMMAND") plus empty = NORMAL.
+func (c *Compose) resolveMode(label string) Mode {
+	switch label {
+	case "INSERT":
+		return ModeInsert
+	case "VISUAL":
+		return ModeVisual
+	case "COMMAND":
+		return ModeCommandLine
+	default:
+		return ModeNormal
+	}
 }
 
 func (c *Compose) cursorRenderLineWrapped(width int) int {

@@ -130,3 +130,108 @@ func TestHistoryToolCallRendersCompact(t *testing.T) {
 		t.Fatalf("expected compact tool call with prefix, got %q", view)
 	}
 }
+
+// With auto-follow on (default), appending new content keeps the newest
+// content visible at the bottom of the pane.
+func TestHistoryAutoFollowKeepsLatestVisible(t *testing.T) {
+	h := NewHistoryScreen()
+	h.width = 80
+	h.height = 10
+	for i := 0; i < 6; i++ {
+		h.AppendItem(TranscriptItem{Kind: TranscriptAssistant, Text: "old content line"}, true)
+	}
+	h.AppendItem(TranscriptItem{Kind: TranscriptUser, Text: "current question"}, true)
+	h.AppendItem(TranscriptItem{Kind: TranscriptAssistant, Text: "short reply"}, true)
+
+	view := stripANSI(h.View())
+	if !strings.Contains(view, "short reply") {
+		t.Fatalf("expected latest reply visible, got %q", view)
+	}
+}
+
+// ScrollUp past line 0 clamps at 0 and disables auto-follow.
+func TestHistoryScrollUpClampsAtZero(t *testing.T) {
+	h := NewHistoryScreen()
+	h.width = 80
+	h.height = 4
+	for i := 0; i < 20; i++ {
+		h.AppendItem(TranscriptItem{Kind: TranscriptAssistant, Text: "line"}, true)
+	}
+	// Prime the cache so maxTopLine() is stable.
+	_ = h.View()
+
+	h.ScrollUp(9999)
+	if h.topLine != 0 {
+		t.Fatalf("expected topLine clamped to 0, got %d", h.topLine)
+	}
+	if h.followTail {
+		t.Fatalf("expected followTail cleared after manual scroll")
+	}
+}
+
+// Scrolling all the way down re-arms auto-follow so new content keeps
+// tracking the tail.
+func TestHistoryScrollDownAtMaxRearmsFollow(t *testing.T) {
+	h := NewHistoryScreen()
+	h.width = 80
+	h.height = 4
+	for i := 0; i < 20; i++ {
+		h.AppendItem(TranscriptItem{Kind: TranscriptAssistant, Text: "line"}, true)
+	}
+	_ = h.View()
+
+	h.ScrollUp(10) // park the view
+	if h.followTail {
+		t.Fatalf("setup: followTail should be false after ScrollUp")
+	}
+	h.ScrollDown(9999)
+	if !h.followTail {
+		t.Fatalf("expected followTail re-armed after scrolling to bottom")
+	}
+}
+
+// When the user has scrolled up, appending new items should NOT snap the
+// view back to the bottom — their scroll position is sticky.
+func TestHistoryManualScrollIsSticky(t *testing.T) {
+	h := NewHistoryScreen()
+	h.width = 80
+	h.height = 4
+	for i := 0; i < 20; i++ {
+		h.AppendItem(TranscriptItem{Kind: TranscriptAssistant, Text: "oldline"}, true)
+	}
+	_ = h.View()
+	h.ScrollToTop()
+	_ = h.View()
+	topBefore := h.topLine
+
+	h.AppendItem(TranscriptItem{Kind: TranscriptAssistant, Text: "freshline"}, true)
+	view := stripANSI(h.View())
+
+	if h.topLine != topBefore {
+		t.Fatalf("expected topLine to stay at %d after append, got %d", topBefore, h.topLine)
+	}
+	if strings.Contains(view, "freshline") {
+		t.Fatalf("expected new item not to snap into view while scrolled up, got:\n%s", view)
+	}
+}
+
+// Consecutive tool calls should stack without a blank line between them.
+func TestHistoryAdjacentToolsStackTightly(t *testing.T) {
+	h := NewHistoryScreen()
+	h.width = 80
+	h.height = 20
+	h.AppendItem(TranscriptItem{Kind: TranscriptTool, Text: "Read one.go"}, true)
+	h.AppendItem(TranscriptItem{Kind: TranscriptTool, Text: "Read two.go"}, true)
+
+	view := stripANSI(h.View())
+	// Both summaries present, no blank line between them.
+	idxOne := strings.Index(view, "⎿ Read one.go")
+	idxTwo := strings.Index(view, "⎿ Read two.go")
+	if idxOne < 0 || idxTwo < 0 {
+		t.Fatalf("expected both tool summaries, got %q", view)
+	}
+	between := view[idxOne:idxTwo]
+	if strings.Count(between, "\n") > 1 {
+		t.Fatalf("expected tight stacking between consecutive tool calls, got:\n%s", between)
+	}
+}

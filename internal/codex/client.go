@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -61,7 +60,7 @@ func NewClient(opts ...Option) *Client {
 	c := &Client{
 		cmdPath:  "codex",
 		cmdArgs:  []string{"app-server"},
-		model:    "gpt-5.1",
+		model:    "gpt-5.4",
 		pending:  make(map[int64]chan rpcMessage),
 		eventsCh: make(chan Event, 128),
 	}
@@ -314,11 +313,6 @@ func (c *Client) handleNotification(msg rpcMessage) {
 }
 
 func (c *Client) emit(ev Event) {
-	f, err := os.OpenFile("/tmp/kata-debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err == nil {
-		_, _ = f.WriteString(fmt.Sprintf("emit: type=%d item=%q text=%q\n", ev.Type, ev.ItemID, ev.Text))
-		_ = f.Close()
-	}
 	select {
 	case c.eventsCh <- ev:
 	default:

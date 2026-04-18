@@ -34,6 +34,12 @@ const (
 	ActionPasteBefore
 	ActionFocusCompose
 	ActionFocusHistory
+	ActionScrollUp
+	ActionScrollDown
+	ActionScrollHalfPageUp
+	ActionScrollHalfPageDown
+	ActionScrollTop
+	ActionScrollBottom
 )
 
 type KeyStroke struct {
@@ -112,8 +118,21 @@ func defaultBindings() []Binding {
 		{Pane: PaneCompose, Mode: ModeVisual, Key: KeyStroke{Type: tea.KeyRunes, Runes: "0"}, Action: ActionLineStart},
 		{Pane: PaneCompose, Mode: ModeVisual, Key: KeyStroke{Type: tea.KeyRunes, Runes: "$"}, Action: ActionLineEnd},
 
-		// History - Normal mode (view-only, no vim navigation)
+		// History - Normal mode (vim-ish scroll controls)
 		{Pane: PaneHistory, Mode: ModeNormal, Key: KeyStroke{Type: tea.KeyEsc}, Action: ActionEnterNormal},
+		{Pane: PaneHistory, Mode: ModeNormal, Key: KeyStroke{Type: tea.KeyRunes, Runes: "k"}, Action: ActionScrollUp},
+		{Pane: PaneHistory, Mode: ModeNormal, Key: KeyStroke{Type: tea.KeyRunes, Runes: "j"}, Action: ActionScrollDown},
+		{Pane: PaneHistory, Mode: ModeNormal, Key: KeyStroke{Type: tea.KeyUp}, Action: ActionScrollUp},
+		{Pane: PaneHistory, Mode: ModeNormal, Key: KeyStroke{Type: tea.KeyDown}, Action: ActionScrollDown},
+		{Pane: PaneHistory, Mode: ModeNormal, Key: KeyStroke{Type: tea.KeyCtrlU}, Action: ActionScrollHalfPageUp},
+		{Pane: PaneHistory, Mode: ModeNormal, Key: KeyStroke{Type: tea.KeyCtrlD}, Action: ActionScrollHalfPageDown},
+		{Pane: PaneHistory, Mode: ModeNormal, Key: KeyStroke{Type: tea.KeyRunes, Runes: "G"}, Action: ActionScrollBottom},
+
+		// Global scroll (any pane, non-insert modes)
+		{Pane: PaneAny, Mode: ModeNormal, Key: KeyStroke{Type: tea.KeyPgUp}, Action: ActionScrollHalfPageUp},
+		{Pane: PaneAny, Mode: ModeNormal, Key: KeyStroke{Type: tea.KeyPgDown}, Action: ActionScrollHalfPageDown},
+		{Pane: PaneAny, Mode: ModeVisual, Key: KeyStroke{Type: tea.KeyPgUp}, Action: ActionScrollHalfPageUp},
+		{Pane: PaneAny, Mode: ModeVisual, Key: KeyStroke{Type: tea.KeyPgDown}, Action: ActionScrollHalfPageDown},
 	}
 }
 

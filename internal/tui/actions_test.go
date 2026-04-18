@@ -14,11 +14,27 @@ func TestCtrlINotBoundToSwitch(t *testing.T) {
 	}
 }
 
-func TestHistoryPaneHasNoVimBindings(t *testing.T) {
+func TestHistoryPaneScrollBindings(t *testing.T) {
 	bindings := defaultBindings()
-	j := keystrokeFromMsg(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
-	if _, ok := findBinding(bindings, PaneHistory, ModeNormal, j); ok {
-		t.Fatalf("history pane should not have j binding")
+	cases := []struct {
+		key    tea.KeyMsg
+		action ActionID
+	}{
+		{tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}}, ActionScrollDown},
+		{tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}}, ActionScrollUp},
+		{tea.KeyMsg{Type: tea.KeyCtrlU, Runes: nil}, ActionScrollHalfPageUp},
+		{tea.KeyMsg{Type: tea.KeyCtrlD, Runes: nil}, ActionScrollHalfPageDown},
+		{tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}}, ActionScrollBottom},
+	}
+	for _, c := range cases {
+		ks := keystrokeFromMsg(c.key)
+		action, ok := findBinding(bindings, PaneHistory, ModeNormal, ks)
+		if !ok {
+			t.Fatalf("missing history binding for %+v", ks)
+		}
+		if action != c.action {
+			t.Fatalf("for %+v got %v, want %v", ks, action, c.action)
+		}
 	}
 }
 
