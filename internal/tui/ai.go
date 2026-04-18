@@ -4,30 +4,38 @@ import (
 	"context"
 	"sync"
 
+	"github.com/boatnoah/kata/internal/agent"
 	"github.com/boatnoah/kata/internal/codex"
 )
 
-// codexClient defines the subset of codex.Client we rely on; helps with tests.
-type codexClient interface {
-	Start(ctx context.Context) error
-	SendText(ctx context.Context, text string) (string, error)
-	Events() <-chan codex.Event
-	Close() error
-}
-
-// AIManager owns the Codex client lifecycle and start-once behavior.
+// AIManager owns an agent provider's lifecycle and start-once behavior.
+// It is the single place the UI asks "what AI am I talking to?" — today
+// that's always Codex, but Provider()/Model() give us a seam to grow into
+// additional backends without touching the statusline.
 type AIManager struct {
-	client    codexClient
+	provider  string
+	client    agent.Provider
 	startOnce sync.Once
 	startErr  error
 }
 
 func newAIManager() *AIManager {
-	return &AIManager{client: codex.NewClient()}
+	return &AIManager{provider: "codex", client: codex.NewClient()}
 }
 
-func newAIManagerWithClient(c codexClient) *AIManager {
-	return &AIManager{client: c}
+func newAIManagerWithClient(c agent.Provider) *AIManager {
+	return &AIManager{provider: "codex", client: c}
+}
+
+// Provider reports the backend label shown in the statusline (e.g. "codex").
+func (m *AIManager) Provider() string { return m.provider }
+
+// Model reports the underlying client's configured model, or "" if unset.
+func (m *AIManager) Model() string {
+	if m.client == nil {
+		return ""
+	}
+	return m.client.Model()
 }
 
 func (m *AIManager) Start(ctx context.Context) error {
@@ -50,7 +58,7 @@ func (m *AIManager) SendText(ctx context.Context, text string) error {
 	return err
 }
 
-func (m *AIManager) Events() <-chan codex.Event {
+func (m *AIManager) Events() <-chan agent.Event {
 	if m.client == nil {
 		return nil
 	}

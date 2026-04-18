@@ -14,7 +14,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/boatnoah/kata/internal/codex"
+	"github.com/boatnoah/kata/internal/agent"
 )
 
 type App struct {
@@ -35,6 +35,7 @@ type App struct {
 	theme              Theme
 	sessionID          string
 	branch             string
+	provider           string
 	model              string
 	title              string
 	ctxUsed            int
@@ -54,7 +55,7 @@ type App struct {
 const aiTypeInterval = 35 * time.Millisecond
 const aiRunesPerTick = 3
 
-type codexEventMsg struct{ ev codex.Event }
+type codexEventMsg struct{ ev agent.Event }
 type codexErrorMsg struct{ err error }
 type aiTickMsg struct{ itemID string }
 type clearStatusMsg struct{}
@@ -78,7 +79,6 @@ func NewApp() *App {
 		theme:              DefaultTheme(),
 		sessionID:          newSessionID(),
 		branch:             detectBranch(),
-		model:              "sonnet-4.5",
 		ctxTotal:           200_000,
 		ai:                 newAIManager(),
 		aiStreams:          make(map[string]string),
@@ -91,6 +91,8 @@ func NewApp() *App {
 		aiTicking:          make(map[string]bool),
 		aiTurnPlaceholders: make(map[string]string),
 	}
+	a.provider = a.ai.Provider()
+	a.model = a.ai.Model()
 	a.compose.SetTheme(a.theme)
 	a.history.SetTheme(a.theme)
 	return a
@@ -503,10 +505,9 @@ func (a *App) runCommand(input string) tea.Cmd {
 	case "model":
 		a.exitCommandLine()
 		if len(args) == 0 {
-			a.flashStatus("current model: " + a.model)
+			a.flashStatus("current model: " + a.provider + " · " + a.model)
 		} else {
-			a.model = args[0]
-			a.flashStatus("model → " + a.model)
+			a.flashStatus("model swap not yet supported (only " + a.provider + " is wired)")
 		}
 		return a.clearStatusAfter(2 * time.Second)
 	case "help":
@@ -581,21 +582,24 @@ func (a *App) sendToAI(text string) tea.Cmd {
 	}
 }
 
-func (a *App) handleCodexEvent(ev codex.Event) tea.Cmd {
+func (a *App) handleCodexEvent(ev agent.Event) tea.Cmd {
 	switch ev.Type {
-	case codex.EventTurnStarted:
+	case agent.EventTurnStarted:
 		return a.startAIThinking(ev.TurnID)
-	case codex.EventAgentDelta:
+	case agent.EventAgentDelta:
 		a.adoptThinkingPlaceholder(ev.TurnID, ev.ItemID)
 		return a.upsertAIStream(ev.ItemID, aiTypeResponse, ev.Text, false)
-	case codex.EventAgentCompleted:
+	case agent.EventAgentCompleted:
 		a.adoptThinkingPlaceholder(ev.TurnID, ev.ItemID)
 		return a.upsertAIStream(ev.ItemID, aiTypeResponse, ev.Text, true)
-	case codex.EventToolCall:
+	case agent.EventToolCall:
 		return a.setToolCallSummary(ev.ItemID, summarizeToolCall(ev))
-	case codex.EventCommandOutput:
+	case agent.EventCommandOutput:
 		return nil
-	case codex.EventTurnCompleted:
+	case agent.EventTokenUsage:
+		a.applyTokenUsage(ev.Payload)
+		return nil
+	case agent.EventTurnCompleted:
 		if ev.Payload != nil {
 			if errVal, ok := ev.Payload["error"]; ok {
 				a.history.AppendItem(TranscriptItem{Kind: TranscriptError, Text: sanitizeText(fmt.Sprint(errVal))}, true)
@@ -607,7 +611,7 @@ func (a *App) handleCodexEvent(ev codex.Event) tea.Cmd {
 			cmds = append(cmds, a.upsertAIStream(id, label, "", true))
 		}
 		return tea.Batch(cmds...)
-	case codex.EventError:
+	case agent.EventError:
 		if ev.Payload != nil {
 			if msg, ok := ev.Payload["error"].(string); ok {
 				a.history.AppendItem(TranscriptItem{Kind: TranscriptError, Text: sanitizeText(msg)}, true)
@@ -615,6 +619,22 @@ func (a *App) handleCodexEvent(ev codex.Event) tea.Cmd {
 		}
 	}
 	return nil
+}
+
+// applyTokenUsage folds a Codex token-usage snapshot into the statusline
+// counters. `used` is the last turn's prompt size (what currently fills the
+// context window); `contextWindow`, when present, replaces the default limit
+// so the displayed total matches the model the backend actually picked.
+func (a *App) applyTokenUsage(payload map[string]any) {
+	if payload == nil {
+		return
+	}
+	if v, ok := payload["used"].(int); ok && v >= 0 {
+		a.ctxUsed = v
+	}
+	if v, ok := payload["contextWindow"].(int); ok && v > 0 {
+		a.ctxTotal = v
+	}
 }
 
 // setToolCallSummary writes a tool-call summary as a complete item, replacing
@@ -894,7 +914,7 @@ func sanitizeHistoryMessage(s string) string {
 	return s
 }
 
-func summarizeToolCall(ev codex.Event) string {
+func summarizeToolCall(ev agent.Event) string {
 	name, _ := ev.Payload["name"].(string)
 	text := strings.TrimSpace(sanitizeHistoryMessage(ev.Text))
 	lower := strings.ToLower(name)
@@ -1081,6 +1101,7 @@ func (a *App) chromeSnapshot() chromeSnapshot {
 		mode:      a.mode,
 		scope:     a.scopeLabel(),
 		branch:    a.branch,
+		provider:  a.provider,
 		model:     a.model,
 		ctxUsed:   a.ctxUsed,
 		ctxTotal:  a.ctxTotal,

@@ -6,7 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/boatnoah/kata/internal/codex"
+	"github.com/boatnoah/kata/internal/agent"
 )
 
 func drainAIStream(app *App, itemID string) {
@@ -202,7 +202,7 @@ func TestRenderAIStreamShowsWaitingStatusWhenCaughtUp(t *testing.T) {
 }
 
 func TestSummarizeToolCallCollapsesReadActivity(t *testing.T) {
-	ev := codex.Event{
+	ev := agent.Event{
 		Payload: map[string]any{"name": "read"},
 		Text:    "go.mod\nmodule github.com/boatnoah/kata\n",
 	}
@@ -380,7 +380,7 @@ func TestHandleCodexEventSkipsCommandOutput(t *testing.T) {
 	app := NewApp()
 	before := len(app.history.items)
 
-	cmd := app.handleCodexEvent(codex.Event{Type: codex.EventCommandOutput, ItemID: "cmd-1", Text: "package main\nfunc main() {}"})
+	cmd := app.handleCodexEvent(agent.Event{Type: agent.EventCommandOutput, ItemID: "cmd-1", Text: "package main\nfunc main() {}"})
 
 	if cmd != nil {
 		t.Fatalf("expected no command output render cmd, got %v", cmd)

@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	"github.com/boatnoah/kata/internal/agent"
 )
 
 // Client manages a Codex app-server subprocess over JSON-RPC (JSONL over stdio).
@@ -31,7 +33,7 @@ type Client struct {
 	pending  map[int64]chan rpcMessage
 	pendMu   sync.Mutex
 	writeMu  sync.Mutex
-	eventsCh chan Event
+	eventsCh chan agent.Event
 
 	threadID string
 	started  atomic.Bool
@@ -62,7 +64,7 @@ func NewClient(opts ...Option) *Client {
 		cmdArgs:  []string{"app-server"},
 		model:    "gpt-5.4",
 		pending:  make(map[int64]chan rpcMessage),
-		eventsCh: make(chan Event, 128),
+		eventsCh: make(chan agent.Event, 128),
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -141,7 +143,12 @@ func (c *Client) Close() error {
 }
 
 // Events returns a channel of streaming events (agent deltas, tool calls, etc.).
-func (c *Client) Events() <-chan Event { return c.eventsCh }
+func (c *Client) Events() <-chan agent.Event { return c.eventsCh }
+
+// Model reports the model the client was configured with. This is what
+// thread/start was (or will be) called with — the UI uses it to label the
+// active session.
+func (c *Client) Model() string { return c.model }
 
 // SendText starts a turn with user text and streams responses via Events.
 func (c *Client) SendText(ctx context.Context, text string) (string, error) {
@@ -254,7 +261,7 @@ func (c *Client) handleNotification(msg rpcMessage) {
 	case msg.Method == "turn/started":
 		var params turnStartedParams
 		if err := json.Unmarshal(msg.Params, &params); err == nil {
-			c.emit(Event{Type: EventTurnStarted, ThreadID: params.ThreadID, TurnID: params.Turn.ID, ItemID: params.Turn.ID})
+			c.emit(agent.Event{Type: agent.EventTurnStarted, ThreadID: params.ThreadID, TurnID: params.Turn.ID, ItemID: params.Turn.ID})
 		}
 	case msg.Method == "turn/completed":
 		var params turnCompletedParams
@@ -263,56 +270,69 @@ func (c *Client) handleNotification(msg rpcMessage) {
 			if params.Turn.Error != nil {
 				payload["error"] = params.Turn.Error
 			}
-			c.emit(Event{Type: EventTurnCompleted, ThreadID: params.ThreadID, TurnID: params.Turn.ID, ItemID: params.Turn.ID, Payload: payload})
+			c.emit(agent.Event{Type: agent.EventTurnCompleted, ThreadID: params.ThreadID, TurnID: params.Turn.ID, ItemID: params.Turn.ID, Payload: payload})
 		}
 	case msg.Method == "item/agentMessage/delta":
 		var params agentMessageDeltaParams
 		if err := json.Unmarshal(msg.Params, &params); err == nil {
-			c.emit(Event{Type: EventAgentDelta, ThreadID: params.ThreadID, TurnID: params.TurnID, ItemID: params.ItemID, Text: params.Delta})
+			c.emit(agent.Event{Type: agent.EventAgentDelta, ThreadID: params.ThreadID, TurnID: params.TurnID, ItemID: params.ItemID, Text: params.Delta})
 		}
 	case strings.HasPrefix(msg.Method, "item/agentMessage/"):
 		var params agentMessageParams
 		if err := json.Unmarshal(msg.Params, &params); err == nil {
 			text := params.Item.Text()
-			etype := EventAgentDelta
+			etype := agent.EventAgentDelta
 			if strings.HasSuffix(msg.Method, "completed") {
-				etype = EventAgentCompleted
+				etype = agent.EventAgentCompleted
 			}
-			c.emit(Event{Type: etype, ThreadID: params.ThreadID, TurnID: params.TurnID, ItemID: params.Item.ID, Text: text})
+			c.emit(agent.Event{Type: etype, ThreadID: params.ThreadID, TurnID: params.TurnID, ItemID: params.Item.ID, Text: text})
 		}
 	case strings.HasPrefix(msg.Method, "item/toolCall/"):
 		var params toolCallParams
 		if err := json.Unmarshal(msg.Params, &params); err == nil {
-			c.emit(Event{Type: EventToolCall, ThreadID: params.ThreadID, TurnID: params.TurnID, ItemID: params.Item.ID, Text: params.Item.Text(), Payload: map[string]any{"name": params.Item.Name}})
+			c.emit(agent.Event{Type: agent.EventToolCall, ThreadID: params.ThreadID, TurnID: params.TurnID, ItemID: params.Item.ID, Text: params.Item.Text(), Payload: map[string]any{"name": params.Item.Name}})
 		}
 	case strings.HasPrefix(msg.Method, "item/commandExecution/"):
 		if msg.Method == "item/commandExecution/outputDelta" {
 			var params commandExecOutputDeltaParams
 			if err := json.Unmarshal(msg.Params, &params); err == nil {
-				c.emit(Event{Type: EventCommandOutput, ThreadID: params.ThreadID, TurnID: params.TurnID, ItemID: params.ItemID, Text: params.Delta})
+				c.emit(agent.Event{Type: agent.EventCommandOutput, ThreadID: params.ThreadID, TurnID: params.TurnID, ItemID: params.ItemID, Text: params.Delta})
 				return
 			}
 		}
 		var params commandExecParams
 		if err := json.Unmarshal(msg.Params, &params); err == nil {
 			payload := map[string]any{"stream": params.Item.Stream}
-			c.emit(Event{Type: EventCommandOutput, ThreadID: params.ThreadID, TurnID: params.TurnID, ItemID: params.Item.ID, Text: params.Item.OutputDelta, Payload: payload})
+			c.emit(agent.Event{Type: agent.EventCommandOutput, ThreadID: params.ThreadID, TurnID: params.TurnID, ItemID: params.Item.ID, Text: params.Item.OutputDelta, Payload: payload})
+		}
+	case msg.Method == "thread/tokenUsage/updated":
+		var params tokenUsageUpdatedParams
+		if err := json.Unmarshal(msg.Params, &params); err == nil {
+			payload := map[string]any{
+				"used":               int(params.TokenUsage.Last.InputTokens),
+				"lastTotalTokens":    int(params.TokenUsage.Last.TotalTokens),
+				"sessionTotalTokens": int(params.TokenUsage.Total.TotalTokens),
+			}
+			if params.TokenUsage.ModelContextWindow != nil {
+				payload["contextWindow"] = int(*params.TokenUsage.ModelContextWindow)
+			}
+			c.emit(agent.Event{Type: agent.EventTokenUsage, ThreadID: params.ThreadID, TurnID: params.TurnID, Payload: payload})
 		}
 	case msg.Method == "item/completed":
 		var params itemCompletedParams
 		if err := json.Unmarshal(msg.Params, &params); err == nil {
 			switch params.Item.Type {
 			case "agentMessage":
-				c.emit(Event{Type: EventAgentCompleted, ThreadID: params.ThreadID, TurnID: params.TurnID, ItemID: params.Item.ID, Text: params.Item.Text})
+				c.emit(agent.Event{Type: agent.EventAgentCompleted, ThreadID: params.ThreadID, TurnID: params.TurnID, ItemID: params.Item.ID, Text: params.Item.Text})
 			case "commandExecution":
 				payload := map[string]any{"stream": params.Item.Stream}
-				c.emit(Event{Type: EventCommandOutput, ThreadID: params.ThreadID, TurnID: params.TurnID, ItemID: params.Item.ID, Text: params.Item.Output, Payload: payload})
+				c.emit(agent.Event{Type: agent.EventCommandOutput, ThreadID: params.ThreadID, TurnID: params.TurnID, ItemID: params.Item.ID, Text: params.Item.Output, Payload: payload})
 			}
 		}
 	}
 }
 
-func (c *Client) emit(ev Event) {
+func (c *Client) emit(ev agent.Event) {
 	select {
 	case c.eventsCh <- ev:
 	default:
@@ -324,7 +344,7 @@ func (c *Client) emitError(err error) {
 	if err == nil {
 		return
 	}
-	c.emit(Event{Type: EventError, Payload: map[string]any{"error": err.Error()}})
+	c.emit(agent.Event{Type: agent.EventError, Payload: map[string]any{"error": err.Error()}})
 }
 
 func (c *Client) call(ctx context.Context, method string, params any, out any) error {

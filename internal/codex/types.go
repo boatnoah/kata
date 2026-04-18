@@ -5,29 +5,6 @@ import (
 	"strings"
 )
 
-// EventType enumerates stream event kinds.
-type EventType int
-
-const (
-	EventAgentDelta EventType = iota
-	EventAgentCompleted
-	EventToolCall
-	EventCommandOutput
-	EventTurnStarted
-	EventTurnCompleted
-	EventError
-)
-
-// Event carries streaming updates from Codex notifications.
-type Event struct {
-	Type     EventType
-	ThreadID string
-	TurnID   string
-	ItemID   string
-	Text     string
-	Payload  map[string]any
-}
-
 type rpcMessage struct {
 	ID     json.RawMessage `json:"id,omitempty"`
 	Method string          `json:"method,omitempty"`
@@ -212,6 +189,26 @@ type itemCompletedParams struct {
 	ThreadID string              `json:"threadId,omitempty"`
 	TurnID   string              `json:"turnId,omitempty"`
 	Item     completedThreadItem `json:"item"`
+}
+
+type tokenUsageUpdatedParams struct {
+	ThreadID   string           `json:"threadId"`
+	TurnID     string           `json:"turnId,omitempty"`
+	TokenUsage threadTokenUsage `json:"tokenUsage"`
+}
+
+type threadTokenUsage struct {
+	Last               tokenUsageBreakdown `json:"last"`
+	Total              tokenUsageBreakdown `json:"total"`
+	ModelContextWindow *int64              `json:"modelContextWindow,omitempty"`
+}
+
+type tokenUsageBreakdown struct {
+	CachedInputTokens     int64 `json:"cachedInputTokens"`
+	InputTokens           int64 `json:"inputTokens"`
+	OutputTokens          int64 `json:"outputTokens"`
+	ReasoningOutputTokens int64 `json:"reasoningOutputTokens"`
+	TotalTokens           int64 `json:"totalTokens"`
 }
 
 type completedThreadItem struct {
