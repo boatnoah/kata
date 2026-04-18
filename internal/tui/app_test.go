@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -209,6 +210,90 @@ func TestSummarizeToolCallCollapsesReadActivity(t *testing.T) {
 	got := summarizeToolCall(ev)
 	if got != "Read go.mod" {
 		t.Fatalf("expected compact read summary, got %q", got)
+	}
+}
+
+// Entering CHAT scope and pressing `v` should put the app into ModeVisual
+// without ensureModeSupported downgrading it. Esc clears the selection.
+func TestHistoryVisualModeAllowedAndCleared(t *testing.T) {
+	app := NewApp()
+	app.history.width = 60
+	app.history.height = 10
+	app.history.AppendItem(TranscriptItem{Kind: TranscriptUser, Text: "one"}, true)
+	app.history.AppendItem(TranscriptItem{Kind: TranscriptAssistant, Text: "two"}, true)
+
+	// leader + k → focus history
+	app.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	app.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	if app.activePane != PaneHistory {
+		t.Fatalf("expected history pane focus, got %v", app.activePane)
+	}
+
+	// `v` → enter visual
+	app.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	if app.mode != ModeVisual {
+		t.Fatalf("expected visual mode in history, got %v", app.mode)
+	}
+	if !app.history.VisualActive() {
+		t.Fatalf("expected history visual selection active")
+	}
+
+	// Esc → back to normal, selection cleared
+	app.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
+	if app.mode != ModeNormal {
+		t.Fatalf("expected normal mode after esc, got %v", app.mode)
+	}
+	if app.history.VisualActive() {
+		t.Fatalf("expected history visual selection cleared after esc")
+	}
+}
+
+// The total frame must be exactly a.height rows — not taller. A frame that
+// overflows the terminal causes the topbar to scroll off-screen, which looks
+// like flicker as different frames overlap.
+func TestAppViewFrameHeightMatchesTerminal(t *testing.T) {
+	app := NewApp()
+	app.width = 80
+	app.height = 24
+	for i := 0; i < 20; i++ {
+		app.history.AppendItem(TranscriptItem{Kind: TranscriptAssistant, Text: "hi"}, true)
+	}
+	view := app.View()
+	rows := strings.Count(view, "\n") + 1
+	if rows != app.height {
+		t.Fatalf("expected frame height %d rows, got %d\n--- view ---\n%s\n---", app.height, rows, view)
+	}
+}
+
+// End-to-end: after focusing history and scrolling to the top, pressing k
+// must produce byte-identical frames. Any drift indicates a non-deterministic
+// component in the render path that would show up as flicker in the terminal.
+func TestAppViewStableAtHistoryTop(t *testing.T) {
+	app := NewApp()
+	app.width = 80
+	app.height = 24
+	for i := 0; i < 40; i++ {
+		app.history.AppendItem(TranscriptItem{Kind: TranscriptAssistant, Text: "filler line"}, true)
+	}
+	// Focus history (leader+k), then press k many times to walk to top.
+	app.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	app.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	for i := 0; i < 80; i++ {
+		app.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	}
+	if app.history.cursorLine != 0 {
+		t.Fatalf("expected cursorLine=0 at top, got %d", app.history.cursorLine)
+	}
+	if app.history.topLine != 0 {
+		t.Fatalf("expected topLine=0 at top, got %d", app.history.topLine)
+	}
+	base := app.View()
+	for i := 0; i < 5; i++ {
+		app.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+		got := app.View()
+		if got != base {
+			t.Fatalf("iter %d: frame drifted at top", i)
+		}
 	}
 }
 

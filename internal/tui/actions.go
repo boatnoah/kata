@@ -40,6 +40,12 @@ const (
 	ActionScrollHalfPageDown
 	ActionScrollTop
 	ActionScrollBottom
+	ActionHistoryCursorUp
+	ActionHistoryCursorDown
+	ActionHistoryCursorTop
+	ActionHistoryCursorBottom
+	ActionHistoryEnterVisual
+	ActionHistoryYank
 )
 
 type KeyStroke struct {
@@ -118,15 +124,27 @@ func defaultBindings() []Binding {
 		{Pane: PaneCompose, Mode: ModeVisual, Key: KeyStroke{Type: tea.KeyRunes, Runes: "0"}, Action: ActionLineStart},
 		{Pane: PaneCompose, Mode: ModeVisual, Key: KeyStroke{Type: tea.KeyRunes, Runes: "$"}, Action: ActionLineEnd},
 
-		// History - Normal mode (vim-ish scroll controls)
+		// History - Normal mode (vim-ish cursor + scroll controls)
 		{Pane: PaneHistory, Mode: ModeNormal, Key: KeyStroke{Type: tea.KeyEsc}, Action: ActionEnterNormal},
-		{Pane: PaneHistory, Mode: ModeNormal, Key: KeyStroke{Type: tea.KeyRunes, Runes: "k"}, Action: ActionScrollUp},
-		{Pane: PaneHistory, Mode: ModeNormal, Key: KeyStroke{Type: tea.KeyRunes, Runes: "j"}, Action: ActionScrollDown},
-		{Pane: PaneHistory, Mode: ModeNormal, Key: KeyStroke{Type: tea.KeyUp}, Action: ActionScrollUp},
-		{Pane: PaneHistory, Mode: ModeNormal, Key: KeyStroke{Type: tea.KeyDown}, Action: ActionScrollDown},
+		{Pane: PaneHistory, Mode: ModeNormal, Key: KeyStroke{Type: tea.KeyRunes, Runes: "k"}, Action: ActionHistoryCursorUp},
+		{Pane: PaneHistory, Mode: ModeNormal, Key: KeyStroke{Type: tea.KeyRunes, Runes: "j"}, Action: ActionHistoryCursorDown},
+		{Pane: PaneHistory, Mode: ModeNormal, Key: KeyStroke{Type: tea.KeyUp}, Action: ActionHistoryCursorUp},
+		{Pane: PaneHistory, Mode: ModeNormal, Key: KeyStroke{Type: tea.KeyDown}, Action: ActionHistoryCursorDown},
 		{Pane: PaneHistory, Mode: ModeNormal, Key: KeyStroke{Type: tea.KeyCtrlU}, Action: ActionScrollHalfPageUp},
 		{Pane: PaneHistory, Mode: ModeNormal, Key: KeyStroke{Type: tea.KeyCtrlD}, Action: ActionScrollHalfPageDown},
-		{Pane: PaneHistory, Mode: ModeNormal, Key: KeyStroke{Type: tea.KeyRunes, Runes: "G"}, Action: ActionScrollBottom},
+		{Pane: PaneHistory, Mode: ModeNormal, Key: KeyStroke{Type: tea.KeyRunes, Runes: "G"}, Action: ActionHistoryCursorBottom},
+		{Pane: PaneHistory, Mode: ModeNormal, Key: KeyStroke{Type: tea.KeyRunes, Runes: "v"}, Action: ActionHistoryEnterVisual},
+
+		// History - Visual mode (line-wise selection + yank)
+		{Pane: PaneHistory, Mode: ModeVisual, Key: KeyStroke{Type: tea.KeyEsc}, Action: ActionEnterNormal},
+		{Pane: PaneHistory, Mode: ModeVisual, Key: KeyStroke{Type: tea.KeyRunes, Runes: "j"}, Action: ActionHistoryCursorDown},
+		{Pane: PaneHistory, Mode: ModeVisual, Key: KeyStroke{Type: tea.KeyRunes, Runes: "k"}, Action: ActionHistoryCursorUp},
+		{Pane: PaneHistory, Mode: ModeVisual, Key: KeyStroke{Type: tea.KeyDown}, Action: ActionHistoryCursorDown},
+		{Pane: PaneHistory, Mode: ModeVisual, Key: KeyStroke{Type: tea.KeyUp}, Action: ActionHistoryCursorUp},
+		{Pane: PaneHistory, Mode: ModeVisual, Key: KeyStroke{Type: tea.KeyRunes, Runes: "G"}, Action: ActionHistoryCursorBottom},
+		{Pane: PaneHistory, Mode: ModeVisual, Key: KeyStroke{Type: tea.KeyRunes, Runes: "y"}, Action: ActionHistoryYank},
+		{Pane: PaneHistory, Mode: ModeVisual, Key: KeyStroke{Type: tea.KeyCtrlU}, Action: ActionScrollHalfPageUp},
+		{Pane: PaneHistory, Mode: ModeVisual, Key: KeyStroke{Type: tea.KeyCtrlD}, Action: ActionScrollHalfPageDown},
 
 		// Global scroll (any pane, non-insert modes)
 		{Pane: PaneAny, Mode: ModeNormal, Key: KeyStroke{Type: tea.KeyPgUp}, Action: ActionScrollHalfPageUp},

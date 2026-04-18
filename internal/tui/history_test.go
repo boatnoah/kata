@@ -215,6 +215,184 @@ func TestHistoryManualScrollIsSticky(t *testing.T) {
 	}
 }
 
+// CHAT scope: cursor movement clamps to content bounds.
+func TestHistoryCursorMoveClamped(t *testing.T) {
+	h := NewHistoryScreen()
+	h.width = 80
+	h.height = 10
+	for i := 0; i < 3; i++ {
+		h.AppendItem(TranscriptItem{Kind: TranscriptAssistant, Text: "line"}, true)
+	}
+	_ = h.View()
+
+	h.CursorTop()
+	if h.cursorLine != 0 {
+		t.Fatalf("expected cursorLine=0 after CursorTop, got %d", h.cursorLine)
+	}
+	h.CursorUp(5)
+	if h.cursorLine != 0 {
+		t.Fatalf("expected cursorLine clamped at 0, got %d", h.cursorLine)
+	}
+	h.CursorBottom()
+	total := len(h.renderedLines())
+	if h.cursorLine != total-1 {
+		t.Fatalf("expected cursorLine=%d after CursorBottom, got %d", total-1, h.cursorLine)
+	}
+	h.CursorDown(999)
+	if h.cursorLine != total-1 {
+		t.Fatalf("expected cursorLine clamped at %d, got %d", total-1, h.cursorLine)
+	}
+}
+
+// CHAT scope: entering visual mode anchors selection at cursor; expanding
+// the cursor extends the selection range.
+func TestHistoryVisualSelectionExpands(t *testing.T) {
+	h := NewHistoryScreen()
+	h.width = 80
+	h.height = 20
+	h.AppendItem(TranscriptItem{Kind: TranscriptUser, Text: "first"}, true)
+	h.AppendItem(TranscriptItem{Kind: TranscriptAssistant, Text: "second"}, true)
+	h.AppendItem(TranscriptItem{Kind: TranscriptUser, Text: "third"}, true)
+	_ = h.View()
+
+	h.CursorTop()
+	h.EnterVisual()
+	if !h.VisualActive() {
+		t.Fatalf("expected visual active after EnterVisual")
+	}
+	h.CursorDown(2)
+	lo, hi, ok := h.selectionRange()
+	if !ok {
+		t.Fatalf("expected active selection")
+	}
+	if lo != 0 || hi < 2 {
+		t.Fatalf("expected selection [0..>=2], got [%d..%d]", lo, hi)
+	}
+}
+
+// CHAT scope: ExitVisual clears selection without disturbing cursor.
+func TestHistoryExitVisualClearsSelectionOnly(t *testing.T) {
+	h := NewHistoryScreen()
+	h.width = 80
+	h.height = 10
+	h.AppendItem(TranscriptItem{Kind: TranscriptAssistant, Text: "a"}, true)
+	h.AppendItem(TranscriptItem{Kind: TranscriptAssistant, Text: "b"}, true)
+	_ = h.View()
+
+	h.CursorTop()
+	h.EnterVisual()
+	h.CursorDown(1)
+	prev := h.cursorLine
+	h.ExitVisual()
+	if h.VisualActive() {
+		t.Fatalf("expected visual cleared after ExitVisual")
+	}
+	if h.cursorLine != prev {
+		t.Fatalf("expected cursorLine preserved (%d), got %d", prev, h.cursorLine)
+	}
+}
+
+// Repeated CursorUp from the bottom drives the viewport up until the cursor
+// hits rendered-line 0, then stays stable. No flicker / no stuck topLine.
+func TestHistoryCursorUpScrollsViewportToTop(t *testing.T) {
+	h := NewHistoryScreen()
+	h.width = 60
+	h.height = 5
+	h.SetActive(true)
+	for i := 0; i < 40; i++ {
+		h.AppendItem(TranscriptItem{Kind: TranscriptAssistant, Text: "line"}, true)
+	}
+	// Prime cache + followTail-snapped topLine.
+	_ = h.View()
+
+	// Position cursor at bottom (simulates focus-on-history).
+	h.EnsureCursor()
+	_ = h.View()
+
+	total := len(h.renderedLines())
+	// Keep pressing k; after each press, the cursor must stay visible and
+	// topLine must never be negative / past cursorLine.
+	for step := 0; step < total+5; step++ {
+		prevCursor := h.cursorLine
+		h.CursorUp(1)
+		view := h.View()
+		_ = view
+
+		if h.cursorLine < 0 {
+			t.Fatalf("step=%d cursorLine went negative: %d", step, h.cursorLine)
+		}
+		if h.topLine < 0 {
+			t.Fatalf("step=%d topLine went negative: %d", step, h.topLine)
+		}
+		if h.cursorLine < h.topLine {
+			t.Fatalf("step=%d cursor=%d above topLine=%d (viewport not following)", step, h.cursorLine, h.topLine)
+		}
+		if h.cursorLine > prevCursor {
+			t.Fatalf("step=%d cursor moved DOWN from %d to %d on CursorUp", step, prevCursor, h.cursorLine)
+		}
+	}
+	if h.cursorLine != 0 {
+		t.Fatalf("expected cursorLine=0 at top, got %d", h.cursorLine)
+	}
+	if h.topLine != 0 {
+		t.Fatalf("expected topLine=0 at top, got %d", h.topLine)
+	}
+}
+
+// After parking cursor at the top, successive CursorUp presses must be pure
+// no-ops: View() output must be byte-identical so Bubble Tea can skip redraw.
+func TestHistoryCursorUpAtTopIsStable(t *testing.T) {
+	h := NewHistoryScreen()
+	h.width = 60
+	h.height = 5
+	h.SetActive(true)
+	for i := 0; i < 20; i++ {
+		h.AppendItem(TranscriptItem{Kind: TranscriptAssistant, Text: "line"}, true)
+	}
+	_ = h.View()
+	h.CursorTop()
+	base := h.View()
+	for i := 0; i < 5; i++ {
+		h.CursorUp(1)
+		got := h.View()
+		if got != base {
+			t.Fatalf("iteration %d: View differs at top\nbase=%q\ngot=%q", i, base, got)
+		}
+	}
+}
+
+// After parking cursor at the top, pressing j must scroll cursor AND viewport
+// down in lockstep — the screen position should advance without "correcting"
+// from a broken state.
+func TestHistoryCursorDownAtTopAdvancesViewport(t *testing.T) {
+	h := NewHistoryScreen()
+	h.width = 60
+	h.height = 5
+	h.SetActive(true)
+	for i := 0; i < 20; i++ {
+		h.AppendItem(TranscriptItem{Kind: TranscriptAssistant, Text: "line"}, true)
+	}
+	_ = h.View()
+	h.CursorTop()
+	_ = h.View()
+	if h.cursorLine != 0 || h.topLine != 0 {
+		t.Fatalf("setup: expected top state, got cursor=%d top=%d", h.cursorLine, h.topLine)
+	}
+
+	// Advance past pane height; once cursor crosses bottom row, topLine follows.
+	for i := 0; i < h.height+3; i++ {
+		prevCursor := h.cursorLine
+		h.CursorDown(1)
+		_ = h.View()
+		if h.cursorLine <= prevCursor {
+			t.Fatalf("iter %d: cursor did not advance (%d -> %d)", i, prevCursor, h.cursorLine)
+		}
+		if h.cursorLine >= h.topLine+h.height {
+			t.Fatalf("iter %d: cursor=%d left viewport top=%d height=%d", i, h.cursorLine, h.topLine, h.height)
+		}
+	}
+}
+
 // Consecutive tool calls should stack without a blank line between them.
 func TestHistoryAdjacentToolsStackTightly(t *testing.T) {
 	h := NewHistoryScreen()

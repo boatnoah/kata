@@ -14,23 +14,47 @@ func TestCtrlINotBoundToSwitch(t *testing.T) {
 	}
 }
 
-func TestHistoryPaneScrollBindings(t *testing.T) {
+func TestHistoryPaneNormalBindings(t *testing.T) {
 	bindings := defaultBindings()
 	cases := []struct {
 		key    tea.KeyMsg
 		action ActionID
 	}{
-		{tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}}, ActionScrollDown},
-		{tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}}, ActionScrollUp},
+		{tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}}, ActionHistoryCursorDown},
+		{tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}}, ActionHistoryCursorUp},
 		{tea.KeyMsg{Type: tea.KeyCtrlU, Runes: nil}, ActionScrollHalfPageUp},
 		{tea.KeyMsg{Type: tea.KeyCtrlD, Runes: nil}, ActionScrollHalfPageDown},
-		{tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}}, ActionScrollBottom},
+		{tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}}, ActionHistoryCursorBottom},
+		{tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}}, ActionHistoryEnterVisual},
 	}
 	for _, c := range cases {
 		ks := keystrokeFromMsg(c.key)
 		action, ok := findBinding(bindings, PaneHistory, ModeNormal, ks)
 		if !ok {
 			t.Fatalf("missing history binding for %+v", ks)
+		}
+		if action != c.action {
+			t.Fatalf("for %+v got %v, want %v", ks, action, c.action)
+		}
+	}
+}
+
+func TestHistoryPaneVisualBindings(t *testing.T) {
+	bindings := defaultBindings()
+	cases := []struct {
+		key    tea.KeyMsg
+		action ActionID
+	}{
+		{tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}}, ActionHistoryCursorDown},
+		{tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}}, ActionHistoryCursorUp},
+		{tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}}, ActionHistoryYank},
+		{tea.KeyMsg{Type: tea.KeyEsc, Runes: nil}, ActionEnterNormal},
+	}
+	for _, c := range cases {
+		ks := keystrokeFromMsg(c.key)
+		action, ok := findBinding(bindings, PaneHistory, ModeVisual, ks)
+		if !ok {
+			t.Fatalf("missing history visual binding for %+v", ks)
 		}
 		if action != c.action {
 			t.Fatalf("for %+v got %v, want %v", ks, action, c.action)

@@ -225,6 +225,7 @@ func (a *App) applyAction(action ActionID) tea.Cmd {
 		a.ensureModeSupported()
 	case ActionFocusHistory:
 		a.activePane = PaneHistory
+		a.history.EnsureCursor()
 		a.ensureModeSupported()
 	case ActionEnterInsert:
 		if a.activePane == PaneCompose {
@@ -352,6 +353,20 @@ func (a *App) applyAction(action ActionID) tea.Cmd {
 		a.history.ScrollToTop()
 	case ActionScrollBottom:
 		a.history.ScrollToBottom()
+	case ActionHistoryCursorUp:
+		a.history.CursorUp(1)
+	case ActionHistoryCursorDown:
+		a.history.CursorDown(1)
+	case ActionHistoryCursorTop:
+		a.history.CursorTop()
+	case ActionHistoryCursorBottom:
+		a.history.CursorBottom()
+	case ActionHistoryEnterVisual:
+		a.history.EnterVisual()
+		a.mode = ModeVisual
+	case ActionHistoryYank:
+		a.history.YankSelection()
+		a.mode = ModeNormal
 	}
 
 	// Enforce mode compatibility if we changed panes or modes.
@@ -360,12 +375,19 @@ func (a *App) applyAction(action ActionID) tea.Cmd {
 }
 
 func (a *App) ensureModeSupported() {
-	if a.activePane == PaneHistory && a.mode != ModeNormal && a.mode != ModeCommandLine {
+	// Forbid INSERT in history; NORMAL/VISUAL/COMMAND are all allowed so the
+	// CHAT scope can host line-wise visual selection.
+	if a.activePane == PaneHistory && a.mode == ModeInsert {
 		a.mode = ModeNormal
 	}
 	// Always keep compose visual state in sync with app mode.
 	if a.mode != ModeVisual {
 		a.compose.exitVisualIfActive()
+	}
+	// Same for history: clearing ModeVisual at the app level must tear down
+	// the selection so the next `v` starts fresh.
+	if a.mode != ModeVisual {
+		a.history.ExitVisual()
 	}
 }
 
@@ -493,6 +515,7 @@ func (a *App) switchPane() {
 		a.activePane = PaneCompose
 	} else {
 		a.activePane = PaneHistory
+		a.history.EnsureCursor()
 	}
 	a.ensureModeSupported()
 }
