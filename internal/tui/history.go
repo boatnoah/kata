@@ -3,26 +3,21 @@ package tui
 import (
 	"strings"
 
-	"github.com/charmbracelet/glamour"
-	glamourstyles "github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/reflow/wordwrap"
 	"github.com/muesli/reflow/wrap"
 )
 
-// Style palette for history items.
-var (
-	stylePrompt   = lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Bold(true)
-	styleUserText = lipgloss.NewStyle().Foreground(lipgloss.Color("231")).Bold(true)
-	styleMuted    = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
-	styleError    = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
-)
-
 type itemRenderCache struct {
-	text  string
-	kind  TranscriptKind
-	final bool
-	width int
-	lines []string
+	text   string
+	title  string
+	detail string
+	kind   TranscriptKind
+	tool   ToolState
+	role   ToolRole
+	final  bool
+	width  int
+	lines  []string
 }
 
 type HistoryScreen struct {
@@ -47,17 +42,13 @@ type HistoryScreen struct {
 	visualActive bool
 	visualAnchor int
 
-	// Render cache — avoids re-running glamour for unchanged items.
+	// Render cache — avoids re-running the block pipeline for unchanged items.
 	renderCache []itemRenderCache
 
 	// Assembled lines cache — avoids rebuilding the full line slice multiple
 	// times per frame. Cleared whenever items or width change.
 	linesCache      []renderedHistoryLine
 	linesCacheValid bool
-
-	// Glamour renderer cache, keyed by render width.
-	glamourWidth    int
-	glamourRenderer *glamour.TermRenderer
 }
 
 func NewHistoryScreen() *HistoryScreen {
@@ -69,7 +60,11 @@ func NewHistoryScreen() *HistoryScreen {
 func (h *HistoryScreen) SetTheme(t Theme) {
 	h.theme = t
 	h.invalidateLines()
-	h.glamourRenderer = nil
+	// Per-item render caches bake theme-colored ANSI into their output, so
+	// discard them too.
+	for i := range h.renderCache {
+		h.renderCache[i] = itemRenderCache{}
+	}
 }
 
 func (h *HistoryScreen) OnWindowSize(width, height int) {
@@ -86,7 +81,7 @@ func (h *HistoryScreen) SetActive(active bool) {
 
 func (h *HistoryScreen) AppendItem(item TranscriptItem, _ bool) int {
 	item.Text = sanitizeHistoryMessage(item.Text)
-	if item.Text == "" && item.Kind != TranscriptThinking {
+	if item.Text == "" && item.Kind != TranscriptThinking && item.Kind != TranscriptTool {
 		return len(h.items) - 1
 	}
 	h.items = append(h.items, item)
@@ -101,7 +96,12 @@ func (h *HistoryScreen) UpdateItemAt(index int, item TranscriptItem, _ bool) {
 	item.Text = sanitizeHistoryMessage(item.Text)
 
 	old := h.items[index]
-	contentChanged := old.Text != item.Text || old.Kind != item.Kind || old.Final != item.Final
+	contentChanged := old.Text != item.Text ||
+		old.Kind != item.Kind ||
+		old.Final != item.Final ||
+		old.Title != item.Title ||
+		old.Detail != item.Detail ||
+		old.Tool != item.Tool
 
 	h.items[index] = item
 
@@ -119,7 +119,7 @@ func (h *HistoryScreen) UpdateItemAt(index int, item TranscriptItem, _ bool) {
 // updateCachedStatus patches the status line for an item in-place in the flat
 // lines cache, avoiding a full rebuild for spinner-dot changes.
 func (h *HistoryScreen) updateCachedStatus(index int, item TranscriptItem) {
-	styled := styleMuted.Render(item.Status)
+	styled := lipgloss.NewStyle().Foreground(h.theme.FgDim).Render(item.Status)
 	lastLine := -1
 	for i, l := range h.linesCache {
 		if l.itemIndex == index {
@@ -450,7 +450,8 @@ func (h *HistoryScreen) renderedLines() []renderedHistoryLine {
 
 	var out []renderedHistoryLine
 	for i, item := range h.items {
-		lines := h.cachedRenderItem(i, item, contentWidth)
+		role := h.toolRoleAt(i)
+		lines := h.cachedRenderItem(i, item, contentWidth, role)
 		if len(lines) == 0 {
 			continue
 		}
@@ -483,9 +484,17 @@ func (h *HistoryScreen) invalidateLines() {
 	h.linesCacheValid = false
 }
 
-func (h *HistoryScreen) cachedRenderItem(index int, item TranscriptItem, width int) []string {
+func (h *HistoryScreen) cachedRenderItem(index int, item TranscriptItem, width int, role ToolRole) []string {
 	c := &h.renderCache[index]
-	if c.text == item.Text && c.kind == item.Kind && c.final == item.Final && c.width == width && c.lines != nil {
+	if c.text == item.Text &&
+		c.title == item.Title &&
+		c.detail == item.Detail &&
+		c.kind == item.Kind &&
+		c.tool == item.Tool &&
+		c.role == role &&
+		c.final == item.Final &&
+		c.width == width &&
+		c.lines != nil {
 		if item.Status != "" {
 			return h.applyStatus(c.lines, item.Status, item.Kind)
 		}
@@ -493,10 +502,14 @@ func (h *HistoryScreen) cachedRenderItem(index int, item TranscriptItem, width i
 	}
 	saved := item.Status
 	item.Status = ""
-	lines := h.renderItem(item, width)
+	lines := h.renderItemWithRole(item, width, role)
 	item.Status = saved
 	c.text = item.Text
+	c.title = item.Title
+	c.detail = item.Detail
 	c.kind = item.Kind
+	c.tool = item.Tool
+	c.role = role
 	c.final = item.Final
 	c.width = width
 	c.lines = lines
@@ -511,7 +524,7 @@ func (h *HistoryScreen) cachedRenderItem(index int, item TranscriptItem, width i
 // Otherwise the status line is appended directly beneath the body with no
 // extra blank — item-level spacing is handled in renderedLines.
 func (h *HistoryScreen) applyStatus(cached []string, status string, _ TranscriptKind) []string {
-	styled := styleMuted.Render(status)
+	styled := lipgloss.NewStyle().Foreground(h.theme.FgDim).Render(status)
 	if len(cached) == 0 || (len(cached) == 1 && strings.TrimSpace(stripANSIForLayout(cached[0])) == "") {
 		return []string{styled}
 	}
@@ -523,119 +536,173 @@ func (h *HistoryScreen) applyStatus(cached []string, status string, _ Transcript
 
 func stripANSIForLayout(s string) string {
 	var b strings.Builder
-	inEscape := false
 	for i := 0; i < len(s); i++ {
 		ch := s[i]
-		if inEscape {
-			if (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') {
-				inEscape = false
+		if ch != 0x1b {
+			b.WriteByte(ch)
+			continue
+		}
+		// ESC starts one of several sequences. We care about three shapes:
+		//   CSI — ESC [ … final (0x40-0x7E)
+		//   OSC — ESC ] … ST (ESC \) or BEL (0x07)
+		//   two-byte — ESC + single final byte
+		// OSC 8 hyperlinks live inside OSC; skipping past the ST terminator is
+		// what lets yank/selection see the label text without the URL bleeding
+		// through as if it were ordinary prose.
+		if i+1 >= len(s) {
+			return b.String()
+		}
+		kind := s[i+1]
+		i++
+		switch kind {
+		case '[':
+			for i+1 < len(s) {
+				i++
+				c := s[i]
+				if (c >= 0x40 && c <= 0x7E) {
+					break
+				}
 			}
-			continue
+		case ']':
+			for i+1 < len(s) {
+				i++
+				c := s[i]
+				if c == 0x07 {
+					break
+				}
+				if c == 0x1b && i+1 < len(s) && s[i+1] == '\\' {
+					i++
+					break
+				}
+			}
+		default:
+			// two-byte sequence like ESC = or ESC \; nothing more to consume.
 		}
-		if ch == 0x1b {
-			inEscape = true
-			continue
-		}
-		b.WriteByte(ch)
 	}
 	return b.String()
 }
 
+// renderItem produces the rendered lines for a single transcript item. It
+// dispatches the item to a set of Blocks, renders each, and inserts a
+// single blank line between adjacent non-empty block outputs.
 func (h *HistoryScreen) renderItem(item TranscriptItem, width int) []string {
+	return h.renderItemWithRole(item, width, ToolRoleSingle)
+}
+
+func (h *HistoryScreen) renderItemWithRole(item TranscriptItem, width int, role ToolRole) []string {
+	blocks := itemBlocksWithRole(item, role)
+	var out []string
+	for i, block := range blocks {
+		lines := block.Render(width, h.theme)
+		if len(lines) == 0 {
+			continue
+		}
+		if i > 0 && len(out) > 0 {
+			out = append(out, "")
+		}
+		out = append(out, lines...)
+	}
+	for len(out) > 0 && strings.TrimSpace(stripANSIForLayout(out[len(out)-1])) == "" {
+		out = out[:len(out)-1]
+	}
+	start := 0
+	for start < len(out) && strings.TrimSpace(stripANSIForLayout(out[start])) == "" {
+		start++
+	}
+	if start > 0 {
+		out = out[start:]
+	}
+	return out
+}
+
+// itemBlocks maps a TranscriptItem onto the blocks that represent it.
+// Assistant items produce multiple blocks when the response contains
+// fenced code; every other kind currently maps to a single block.
+func itemBlocks(item TranscriptItem) []Block {
+	return itemBlocksWithRole(item, ToolRoleSingle)
+}
+
+func itemBlocksWithRole(item TranscriptItem, role ToolRole) []Block {
 	switch item.Kind {
 	case TranscriptUser:
-		return splitRenderedBlock(h.renderUser(item.Text, width))
+		return []Block{UserBlock{Text: item.Text}}
 	case TranscriptAssistant:
-		var body string
 		if item.Final {
-			body = h.renderAssistantMarkdown(item.Text, width, true)
-		} else {
-			body = h.renderAssistantMarkdown(item.Text, width, false)
+			return ParseAssistantText(item.Text)
 		}
-		return splitRenderedBlock(body)
+		if strings.TrimSpace(item.Text) == "" {
+			return nil
+		}
+		return []Block{ProseBlock{Text: item.Text}}
 	case TranscriptThinking:
-		return splitRenderedBlock(styleMuted.Italic(true).Render(item.Text))
+		return []Block{ThinkingBlock{Text: item.Text}}
 	case TranscriptTool:
-		return splitRenderedBlock(h.renderTool(item.Text, width))
+		title, detail := item.Title, item.Detail
+		if title == "" {
+			title = firstLine(item.Text)
+		}
+		return []Block{ToolBlock{Title: title, Detail: detail, State: item.Tool, Role: role}}
 	case TranscriptError:
-		return splitRenderedBlock(styleError.Render(wrapToWidth(item.Text, width)))
+		return []Block{ErrorBlock{Text: item.Text}}
 	case TranscriptSystem:
-		return splitRenderedBlock(styleMuted.Render(wrapToWidth(item.Text, width)))
+		return []Block{SystemBlock{Text: item.Text}}
 	default:
-		return splitRenderedBlock(wrapToWidth(item.Text, width))
+		return []Block{SystemBlock{Text: item.Text}}
 	}
 }
 
-func (h *HistoryScreen) renderUser(text string, width int) string {
-	prompt := stylePrompt.Render("❯")
-	wrapped := wrapToWidth(text, max(width-2, 8))
-	lines := strings.Split(wrapped, "\n")
-	for i, line := range lines {
-		lines[i] = styleUserText.Render(line)
+// toolRoleAt determines whether item i is the start of, inside of, or
+// unrelated to a run of adjacent same-verb tool items. Used by the render
+// loop to collapse "Read one.go / Read two.go / Read three.go" into a
+// single `⏺ Read` header followed by `⎿ <file>` continuation lines.
+func (h *HistoryScreen) toolRoleAt(i int) ToolRole {
+	curr := h.items[i]
+	if curr.Kind != TranscriptTool {
+		return ToolRoleSingle
 	}
-	lines[0] = prompt + " " + lines[0]
-	for i := 1; i < len(lines); i++ {
-		lines[i] = "  " + lines[i]
+	verb, arg := toolVerbArg(curr)
+	if verb == "" || arg == "" {
+		return ToolRoleSingle
 	}
-	return strings.Join(lines, "\n")
+
+	prevSame := i > 0 && toolMatchesVerb(h.items[i-1], verb)
+	nextSame := i+1 < len(h.items) && toolMatchesVerb(h.items[i+1], verb)
+
+	switch {
+	case prevSame:
+		return ToolRoleContinuation
+	case nextSame:
+		return ToolRoleGroupStart
+	default:
+		return ToolRoleSingle
+	}
 }
 
-func (h *HistoryScreen) renderAssistantMarkdown(text string, width int, useGlamour bool) string {
-	if width <= 0 {
-		return text
+// toolVerbArg extracts the verb and argument from a tool item, using the
+// same Title→Text fallback as itemBlocks so behavior stays consistent
+// regardless of how the item was constructed.
+func toolVerbArg(item TranscriptItem) (string, string) {
+	if item.Kind != TranscriptTool {
+		return "", ""
 	}
-	markdownWidth := width - 4
-	if markdownWidth < 20 {
-		markdownWidth = width
+	title := item.Title
+	if title == "" {
+		title = firstLine(item.Text)
 	}
-	if !useGlamour {
-		return wrapToWidth(text, markdownWidth)
-	}
-	r := h.glamourFor(markdownWidth)
-	if r == nil {
-		return wrapToWidth(text, markdownWidth)
-	}
-	out, err := r.Render(text)
-	if err != nil {
-		return wrapToWidth(text, markdownWidth)
-	}
-	return strings.TrimRight(out, "\n")
+	return splitTitle(title)
 }
 
-// glamourFor returns a cached glamour renderer for the given width, rebuilding
-// only when the width changes.
-func (h *HistoryScreen) glamourFor(width int) *glamour.TermRenderer {
-	if h.glamourRenderer != nil && h.glamourWidth == width {
-		return h.glamourRenderer
+func toolMatchesVerb(item TranscriptItem, verb string) bool {
+	if item.Kind != TranscriptTool {
+		return false
 	}
-	r, err := glamour.NewTermRenderer(
-		glamour.WithStandardStyle(glamourstyles.DarkStyle),
-		glamour.WithWordWrap(width),
-	)
-	if err != nil {
-		return nil
-	}
-	h.glamourRenderer = r
-	h.glamourWidth = width
-	return r
-}
-
-// renderTool produces a compact single-line tool summary like "⎿ Read go.mod".
-// The summary arrives pre-assembled from summarizeToolCall; we strip everything
-// after the first newline so the pane stays clean and truncate on display
-// width (rune-safe) instead of bytes.
-func (h *HistoryScreen) renderTool(text string, width int) string {
-	summary := strings.TrimSpace(firstLine(text))
-	full := "⎿ " + summary
-	if width > 0 {
-		full = truncateToWidth(full, width)
-	}
-	return styleMuted.Render(full)
+	v, arg := toolVerbArg(item)
+	return arg != "" && v == verb
 }
 
 // truncateToWidth shortens s to fit within maxWidth display cells, ending in
-// an ellipsis if truncated. Operates on runes, ignoring ANSI (none expected
-// here since renderTool truncates before styling).
+// an ellipsis if truncated. Operates on runes; callers pass pre-styled strings
+// only when they know the ANSI won't be sliced (short tool titles, etc.).
 func truncateToWidth(s string, maxWidth int) string {
 	if maxWidth <= 0 {
 		return ""
@@ -672,30 +739,11 @@ func wrapToWidth(s string, width int) string {
 	lines := strings.Split(s, "\n")
 	wrapped := make([]string, 0, len(lines))
 	for _, line := range lines {
-		wrapped = append(wrapped, strings.Split(wrap.String(line, width), "\n")...)
+		// Word-wrap on spaces first so we don't split words. Any line that
+		// still exceeds width (e.g. a URL longer than the pane) gets
+		// hard-wrapped via reflow/wrap as a backstop.
+		wrappedLine := wrap.String(wordwrap.String(line, width), width)
+		wrapped = append(wrapped, strings.Split(wrappedLine, "\n")...)
 	}
 	return strings.Join(wrapped, "\n")
-}
-
-// splitRenderedBlock trims surrounding blank lines and returns the remaining
-// lines. Returns nil for an empty body so the caller can skip the item
-// entirely rather than reserving a blank row.
-func splitRenderedBlock(s string) []string {
-	s = strings.TrimRight(s, "\n")
-	if s == "" {
-		return nil
-	}
-	lines := strings.Split(s, "\n")
-	start := 0
-	for start < len(lines) && strings.TrimSpace(stripANSIForLayout(lines[start])) == "" {
-		start++
-	}
-	end := len(lines)
-	for end > start && strings.TrimSpace(stripANSIForLayout(lines[end-1])) == "" {
-		end--
-	}
-	if start >= end {
-		return nil
-	}
-	return lines[start:end]
 }

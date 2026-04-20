@@ -12,6 +12,17 @@ func stripANSI(s string) string {
 	return ansiPattern.ReplaceAllString(s, "")
 }
 
+func TestStripANSIRemovesOSCHyperlinks(t *testing.T) {
+	// Emulate what styleInline emits for [label](https://example.com): an
+	// OSC 8 wrapper around an SGR-styled label. The stripper must yield just
+	// "label" so yank/selection don't leak URL fragments into the clipboard.
+	in := "\x1b]8;;https://example.com\x1b\\\x1b[4;38;5;45mclick\x1b[0m\x1b]8;;\x1b\\"
+	got := stripANSIForLayout(in)
+	if got != "click" {
+		t.Fatalf("expected bare label, got %q", got)
+	}
+}
+
 func TestHistoryAppendItem(t *testing.T) {
 	h := NewHistoryScreen()
 	idx := h.AppendItem(TranscriptItem{Kind: TranscriptUser, Text: "hello"}, true)
@@ -126,7 +137,7 @@ func TestHistoryToolCallRendersCompact(t *testing.T) {
 	h.AppendItem(TranscriptItem{Kind: TranscriptTool, Text: "Read go.mod"}, true)
 
 	view := stripANSI(h.View())
-	if !strings.Contains(view, "⎿ Read go.mod") {
+	if !strings.Contains(view, "⏺ Read go.mod") {
 		t.Fatalf("expected compact tool call with prefix, got %q", view)
 	}
 }
@@ -393,23 +404,62 @@ func TestHistoryCursorDownAtTopAdvancesViewport(t *testing.T) {
 	}
 }
 
-// Consecutive tool calls should stack without a blank line between them.
-func TestHistoryAdjacentToolsStackTightly(t *testing.T) {
+// Consecutive same-verb tool calls collapse into a single `⏺ Verb` header
+// followed by `⎿ <arg>` continuation lines, mirroring Claude Code's batched
+// tool display instead of repeating the glyph per call.
+func TestHistoryAdjacentToolsGroupUnderOneHeader(t *testing.T) {
 	h := NewHistoryScreen()
 	h.width = 80
 	h.height = 20
 	h.AppendItem(TranscriptItem{Kind: TranscriptTool, Text: "Read one.go"}, true)
 	h.AppendItem(TranscriptItem{Kind: TranscriptTool, Text: "Read two.go"}, true)
+	h.AppendItem(TranscriptItem{Kind: TranscriptTool, Text: "Read three.go"}, true)
 
 	view := stripANSI(h.View())
-	// Both summaries present, no blank line between them.
-	idxOne := strings.Index(view, "⎿ Read one.go")
-	idxTwo := strings.Index(view, "⎿ Read two.go")
-	if idxOne < 0 || idxTwo < 0 {
-		t.Fatalf("expected both tool summaries, got %q", view)
+	// A single header for the whole run.
+	if strings.Count(view, "⏺ Read") != 1 {
+		t.Fatalf("expected exactly one ⏺ Read header, got %q", view)
 	}
-	between := view[idxOne:idxTwo]
-	if strings.Count(between, "\n") > 1 {
-		t.Fatalf("expected tight stacking between consecutive tool calls, got:\n%s", between)
+	// Every file surfaces as a ⎿ continuation line.
+	for _, name := range []string{"one.go", "two.go", "three.go"} {
+		if !strings.Contains(view, "⎿ "+name) {
+			t.Fatalf("expected `⎿ %s` continuation, got %q", name, view)
+		}
+	}
+}
+
+// A tool call with no neighbor of the same verb keeps the compact
+// single-line form — grouping only kicks in when there's something to group.
+func TestHistorySingletonToolStaysInline(t *testing.T) {
+	h := NewHistoryScreen()
+	h.width = 80
+	h.height = 10
+	h.AppendItem(TranscriptItem{Kind: TranscriptTool, Text: "Read go.mod"}, true)
+
+	view := stripANSI(h.View())
+	if !strings.Contains(view, "⏺ Read go.mod") {
+		t.Fatalf("expected inline single-line render, got %q", view)
+	}
+	if strings.Contains(view, "⎿") {
+		t.Fatalf("singleton should not use ⎿ continuation, got %q", view)
+	}
+}
+
+// A run of reads separated by a different verb breaks the group: the second
+// Read starts its own header rather than continuing under the first.
+func TestHistoryToolGroupBreaksOnDifferentVerb(t *testing.T) {
+	h := NewHistoryScreen()
+	h.width = 80
+	h.height = 20
+	h.AppendItem(TranscriptItem{Kind: TranscriptTool, Text: "Read one.go"}, true)
+	h.AppendItem(TranscriptItem{Kind: TranscriptTool, Text: "Searched TODO"}, true)
+	h.AppendItem(TranscriptItem{Kind: TranscriptTool, Text: "Read two.go"}, true)
+
+	view := stripANSI(h.View())
+	if strings.Count(view, "⏺ Read") != 2 {
+		t.Fatalf("expected two ⏺ Read headers split by Searched, got %q", view)
+	}
+	if !strings.Contains(view, "⏺ Searched TODO") {
+		t.Fatalf("expected Searched singleton between reads, got %q", view)
 	}
 }

@@ -208,8 +208,8 @@ func TestSummarizeToolCallCollapsesReadActivity(t *testing.T) {
 	}
 
 	got := summarizeToolCall(ev)
-	if got != "Read go.mod" {
-		t.Fatalf("expected compact read summary, got %q", got)
+	if got.Title != "Read" || got.Detail != "go.mod" {
+		t.Fatalf("expected Title=Read Detail=go.mod, got %+v", got)
 	}
 }
 
@@ -376,17 +376,117 @@ func TestHistoryChordYYFiresInNormalMode(t *testing.T) {
 	}
 }
 
-func TestHandleCodexEventSkipsCommandOutput(t *testing.T) {
+func TestHandleCodexEventSkipsCommandOutputDeltas(t *testing.T) {
 	app := NewApp()
 	before := len(app.history.items)
 
-	cmd := app.handleCodexEvent(agent.Event{Type: agent.EventCommandOutput, ItemID: "cmd-1", Text: "package main\nfunc main() {}"})
+	app.handleCodexEvent(agent.Event{
+		Type:    agent.EventCommandOutput,
+		ItemID:  "cmd-1",
+		Text:    "some stdout",
+		Payload: map[string]any{"phase": "output"},
+	})
 
-	if cmd != nil {
-		t.Fatalf("expected no command output render cmd, got %v", cmd)
-	}
 	if len(app.history.items) != before {
-		t.Fatalf("expected command output to be suppressed")
+		t.Fatalf("expected output-phase command events to be suppressed")
+	}
+}
+
+func TestHandleCodexEventRendersCommandExecution(t *testing.T) {
+	app := NewApp()
+
+	app.handleCodexEvent(agent.Event{
+		Type:   agent.EventCommandOutput,
+		ItemID: "cmd-2",
+		Payload: map[string]any{
+			"phase":   "started",
+			"command": "/bin/zsh -lc \"cat internal/tui/app.go\"",
+		},
+	})
+
+	idx, ok := app.aiIndexes["cmd-2"]
+	if !ok {
+		t.Fatalf("expected a transcript item for started command")
+	}
+	started := app.history.items[idx]
+	if started.Kind != TranscriptTool {
+		t.Fatalf("expected TranscriptTool, got %v", started.Kind)
+	}
+	if started.Title != "Read internal/tui/app.go" {
+		t.Fatalf("expected cat to be classified as Read, got %q", started.Title)
+	}
+	if started.Tool != ToolPending {
+		t.Fatalf("expected ToolPending while running, got %v", started.Tool)
+	}
+	if started.Final {
+		t.Fatalf("expected started item not final")
+	}
+
+	app.handleCodexEvent(agent.Event{
+		Type:   agent.EventCommandOutput,
+		ItemID: "cmd-2",
+		Payload: map[string]any{
+			"phase":    "completed",
+			"command":  "/bin/zsh -lc \"cat internal/tui/app.go\"",
+			"exitCode": 0,
+		},
+	})
+
+	completed := app.history.items[idx]
+	if !completed.Final {
+		t.Fatalf("expected completed item to be final")
+	}
+	if completed.Tool != ToolOK {
+		t.Fatalf("expected ToolOK on exit 0, got %v", completed.Tool)
+	}
+	if completed.Title != "Read internal/tui/app.go" {
+		t.Fatalf("expected title preserved on completion, got %q", completed.Title)
+	}
+}
+
+func TestClassifyCommandRecognizesReadsAndSearches(t *testing.T) {
+	cases := []struct {
+		cmd   string
+		title string
+	}{
+		{`/bin/zsh -lc "sed -n '1,260p' internal/tui/app.go"`, "Read internal/tui/app.go"},
+		{`bash -c 'head -n 50 go.mod'`, "Read go.mod"},
+		{`tail -f logs/server.log`, "Read logs/server.log"},
+		{`rg TODO internal/`, "Searched TODO"},
+		{`grep -n "func main" main.go`, "Searched func main"},
+		{`ls internal/tui`, "Listed internal/tui"},
+		{`ls -la`, "Listed ."},
+		{`pwd`, "Ran pwd"},
+		{`git status`, "Ran git status"},
+	}
+	for _, tc := range cases {
+		got := classifyCommand(tc.cmd)
+		if got.Title != tc.title {
+			t.Errorf("classifyCommand(%q): got %q, want %q", tc.cmd, got.Title, tc.title)
+		}
+	}
+}
+
+func TestHandleCodexEventMarksFailedCommand(t *testing.T) {
+	app := NewApp()
+	app.handleCodexEvent(agent.Event{
+		Type:   agent.EventCommandOutput,
+		ItemID: "cmd-3",
+		Payload: map[string]any{
+			"phase":    "completed",
+			"command":  "false",
+			"exitCode": 1,
+		},
+	})
+	got := app.history.items[len(app.history.items)-1]
+	if got.Tool != ToolErr {
+		t.Fatalf("expected ToolErr on non-zero exit, got %v", got.Tool)
+	}
+	if !got.Final {
+		t.Fatalf("expected failed command item to be final")
+	}
+	if _, ok := app.aiTypes["cmd-3"]; ok {
+		t.Fatalf("expected aiTypes cleared after finalize")
 	}
 }
 

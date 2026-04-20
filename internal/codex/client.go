@@ -296,13 +296,27 @@ func (c *Client) handleNotification(msg rpcMessage) {
 		if msg.Method == "item/commandExecution/outputDelta" {
 			var params commandExecOutputDeltaParams
 			if err := json.Unmarshal(msg.Params, &params); err == nil {
-				c.emit(agent.Event{Type: agent.EventCommandOutput, ThreadID: params.ThreadID, TurnID: params.TurnID, ItemID: params.ItemID, Text: params.Delta})
+				c.emit(agent.Event{Type: agent.EventCommandOutput, ThreadID: params.ThreadID, TurnID: params.TurnID, ItemID: params.ItemID, Text: params.Delta, Payload: map[string]any{"phase": "output"}})
 				return
 			}
 		}
 		var params commandExecParams
 		if err := json.Unmarshal(msg.Params, &params); err == nil {
-			payload := map[string]any{"stream": params.Item.Stream}
+			phase := strings.TrimPrefix(msg.Method, "item/commandExecution/")
+			payload := map[string]any{
+				"phase":   phase,
+				"stream":  params.Item.Stream,
+				"command": params.Item.CommandLine(),
+			}
+			if len(params.Item.CommandArr) > 0 {
+				payload["commandArgs"] = append([]string(nil), params.Item.CommandArr...)
+			}
+			if params.Item.ExitCode != nil {
+				payload["exitCode"] = *params.Item.ExitCode
+			}
+			if params.Item.Status != "" {
+				payload["status"] = params.Item.Status
+			}
 			c.emit(agent.Event{Type: agent.EventCommandOutput, ThreadID: params.ThreadID, TurnID: params.TurnID, ItemID: params.Item.ID, Text: params.Item.OutputDelta, Payload: payload})
 		}
 	case msg.Method == "thread/tokenUsage/updated":
@@ -325,7 +339,20 @@ func (c *Client) handleNotification(msg rpcMessage) {
 			case "agentMessage":
 				c.emit(agent.Event{Type: agent.EventAgentCompleted, ThreadID: params.ThreadID, TurnID: params.TurnID, ItemID: params.Item.ID, Text: params.Item.Text})
 			case "commandExecution":
-				payload := map[string]any{"stream": params.Item.Stream}
+				payload := map[string]any{
+					"phase":   "completed",
+					"stream":  params.Item.Stream,
+					"command": params.Item.CommandLine(),
+				}
+				if len(params.Item.CommandArr) > 0 {
+					payload["commandArgs"] = append([]string(nil), params.Item.CommandArr...)
+				}
+				if params.Item.ExitCode != nil {
+					payload["exitCode"] = *params.Item.ExitCode
+				}
+				if params.Item.Status != "" {
+					payload["status"] = params.Item.Status
+				}
 				c.emit(agent.Event{Type: agent.EventCommandOutput, ThreadID: params.ThreadID, TurnID: params.TurnID, ItemID: params.Item.ID, Text: params.Item.Output, Payload: payload})
 			}
 		}

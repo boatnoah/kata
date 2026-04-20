@@ -50,6 +50,9 @@ type App struct {
 	aiCompleted        map[string]bool
 	aiTicking          map[string]bool
 	aiTurnPlaceholders map[string]string
+	aiToolTitle        map[string]string
+	aiToolDetail       map[string]string
+	aiToolState        map[string]ToolState
 }
 
 const aiTypeInterval = 35 * time.Millisecond
@@ -278,6 +281,9 @@ func NewApp() *App {
 		aiCompleted:        make(map[string]bool),
 		aiTicking:          make(map[string]bool),
 		aiTurnPlaceholders: make(map[string]string),
+		aiToolTitle:        make(map[string]string),
+		aiToolDetail:       make(map[string]string),
+		aiToolState:        make(map[string]ToolState),
 	}
 	a.provider = a.ai.Provider()
 	a.model = a.ai.Model()
@@ -781,9 +787,9 @@ func (a *App) handleCodexEvent(ev agent.Event) tea.Cmd {
 		a.adoptThinkingPlaceholder(ev.TurnID, ev.ItemID)
 		return a.upsertAIStream(ev.ItemID, aiTypeResponse, ev.Text, true)
 	case agent.EventToolCall:
-		return a.setToolCallSummary(ev.ItemID, summarizeToolCall(ev))
+		return a.setToolCallSummary(ev.ItemID, summarizeToolCall(ev), true)
 	case agent.EventCommandOutput:
-		return nil
+		return a.handleCommandExecution(ev)
 	case agent.EventTokenUsage:
 		a.applyTokenUsage(ev.Payload)
 		return nil
@@ -825,17 +831,33 @@ func (a *App) applyTokenUsage(payload map[string]any) {
 	}
 }
 
-// setToolCallSummary writes a tool-call summary as a complete item, replacing
-// any prior summary for the same ID. Tool calls don't animate and don't
-// accumulate deltas — the latest summary wins and the item is finalized.
-func (a *App) setToolCallSummary(itemID, summary string) tea.Cmd {
-	summary = sanitizeHistoryMessage(summary)
+// setToolCallSummary writes or updates a tool-call summary for itemID.
+// When final is true the item is finalized and the per-item maps are torn
+// down; when false the item stays live so subsequent events (e.g. command
+// execution completion) can update its title, detail, or state in place.
+// Empty Title/Detail on the incoming summary preserve the prior value so a
+// "started" event followed by a "completed" event with only an exit code
+// doesn't blank the command line from the previous render.
+func (a *App) setToolCallSummary(itemID string, s toolSummary, final bool) tea.Cmd {
 	a.aiTypes[itemID] = TranscriptTool
-	a.aiStreams[itemID] = summary
-	a.aiRendered[itemID] = summary
-	a.aiCompleted[itemID] = true
+	a.aiStreams[itemID] = ""
+	a.aiRendered[itemID] = ""
+	a.aiCompleted[itemID] = final
+	if s.Title != "" {
+		a.aiToolTitle[itemID] = s.Title
+	} else if _, ok := a.aiToolTitle[itemID]; !ok {
+		a.aiToolTitle[itemID] = ""
+	}
+	if s.Detail != "" {
+		a.aiToolDetail[itemID] = s.Detail
+	} else if _, ok := a.aiToolDetail[itemID]; !ok {
+		a.aiToolDetail[itemID] = ""
+	}
+	a.aiToolState[itemID] = s.State
 	a.renderAIStream(itemID)
-	a.finalizeAIStream(itemID)
+	if final {
+		a.finalizeAIStream(itemID)
+	}
 	return nil
 }
 
@@ -932,6 +954,11 @@ func (a *App) renderAIStream(itemID string) {
 	buf := a.aiRendered[itemID]
 	completed := a.aiCompleted[itemID] && a.aiRendered[itemID] == a.aiStreams[itemID]
 	item := TranscriptItem{ID: itemID, Kind: label, Text: buf, Final: completed}
+	if label == TranscriptTool {
+		item.Title = a.aiToolTitle[itemID]
+		item.Detail = a.aiToolDetail[itemID]
+		item.Tool = a.aiToolState[itemID]
+	}
 	if label == aiTypeWaiting && !completed {
 		item.Status = a.waitingStatus(itemID)
 	}
@@ -953,6 +980,11 @@ func (a *App) finalizeAIStream(itemID string) {
 		return
 	}
 	final := TranscriptItem{ID: itemID, Kind: label, Text: a.aiRendered[itemID], Final: true}
+	if label == TranscriptTool {
+		final.Title = a.aiToolTitle[itemID]
+		final.Detail = a.aiToolDetail[itemID]
+		final.Tool = a.aiToolState[itemID]
+	}
 	focus := a.shouldFollowHistory(itemID)
 	if idx, ok := a.aiIndexes[itemID]; ok {
 		a.history.UpdateItemAt(idx, final, focus)
@@ -962,6 +994,9 @@ func (a *App) finalizeAIStream(itemID string) {
 	delete(a.aiTypes, itemID)
 	delete(a.aiCompleted, itemID)
 	delete(a.aiTicking, itemID)
+	delete(a.aiToolTitle, itemID)
+	delete(a.aiToolDetail, itemID)
+	delete(a.aiToolState, itemID)
 }
 
 func (a *App) shouldFollowHistory(_ string) bool {
@@ -1102,41 +1137,267 @@ func sanitizeHistoryMessage(s string) string {
 	return s
 }
 
-func summarizeToolCall(ev agent.Event) string {
+// toolSummary is the structured form of a tool-call event — a title (e.g.
+// "Read") and an optional detail (first line of output). setToolCallSummary
+// writes these into the TranscriptItem's Title/Detail so ToolBlock can
+// render them across two lines.
+type toolSummary struct {
+	Title  string
+	Detail string
+	State  ToolState
+}
+
+// handleCommandExecution routes shell command events into the tool-call
+// rendering path. gpt-5 emits these as item/commandExecution/* instead of
+// item/toolCall/*; we translate the phase (started, completed, output) into
+// a toolSummary so the ToolBlock renderer can show "⏺ Ran" plus the command
+// line, with the glyph color tracking pending → ok/err.
+func (a *App) handleCommandExecution(ev agent.Event) tea.Cmd {
+	phase, _ := ev.Payload["phase"].(string)
+	if phase == "output" || phase == "outputDelta" {
+		return nil
+	}
+
+	state := ToolPending
+	final := false
+	switch phase {
+	case "completed":
+		final = true
+		state = ToolOK
+		if code, ok := ev.Payload["exitCode"].(int); ok && code != 0 {
+			state = ToolErr
+		}
+		if status, ok := ev.Payload["status"].(string); ok && strings.EqualFold(status, "failed") {
+			state = ToolErr
+		}
+	}
+
+	var summary toolSummary
+	if args, ok := ev.Payload["commandArgs"].([]string); ok && len(args) > 0 {
+		summary = classifyArgs(args)
+	} else {
+		cmdLine, _ := ev.Payload["command"].(string)
+		summary = classifyCommand(cmdLine)
+	}
+	summary.State = state
+	return a.setToolCallSummary(ev.ItemID, summary, final)
+}
+
+// classifyCommand turns a raw shell command line into a single-line tool
+// summary — verb + argument. Inspired by Codex: disguised reads (`cat`,
+// `sed -n 'Np'`, `head`, `tail`) surface as `Read path` instead of the full
+// `/bin/zsh -lc "..."` invocation, which used to pile up one two-line Ran
+// entry per file read. Search and list flavors get the same treatment.
+// Anything we can't classify falls through as `Ran <inner>`.
+func classifyCommand(cmd string) toolSummary {
+	cmd = strings.TrimSpace(cmd)
+	if cmd == "" {
+		return toolSummary{Title: "Ran"}
+	}
+	args := shellTokens(cmd)
+	if len(args) == 0 {
+		return toolSummary{Title: "Ran " + truncateInline(cmd)}
+	}
+	return classifyArgs(args)
+}
+
+// classifyArgs runs the read/search/list detection on a pre-tokenized
+// command. Codex provides commandArray for shell tool calls, which avoids
+// the ambiguity of reparsing a string with embedded quotes.
+func classifyArgs(args []string) toolSummary {
+	args = unwrapShellArgs(args)
+	if len(args) == 0 {
+		return toolSummary{Title: "Ran"}
+	}
+	bin := baseBinary(args[0])
+	rest := args[1:]
+
+	switch bin {
+	case "cat", "head", "tail", "less", "more", "bat":
+		if target, ok := lastFileArg(rest); ok {
+			return toolSummary{Title: "Read " + target}
+		}
+	case "sed":
+		if isSedPrintOnly(rest) {
+			if target, ok := lastFileArg(rest); ok {
+				return toolSummary{Title: "Read " + target}
+			}
+		}
+	case "awk":
+		if target, ok := lastFileArg(rest); ok {
+			return toolSummary{Title: "Read " + target}
+		}
+	case "rg", "grep", "ag", "ack":
+		if pat := firstNonFlag(rest); pat != "" {
+			return toolSummary{Title: "Searched " + truncateInline(pat)}
+		}
+	case "ls", "find", "fd", "tree":
+		if path := firstNonFlag(rest); path != "" {
+			return toolSummary{Title: "Listed " + path}
+		}
+		return toolSummary{Title: "Listed ."}
+	case "git":
+		if len(rest) > 0 {
+			return toolSummary{Title: "Ran git " + truncateInline(strings.Join(rest, " "))}
+		}
+	}
+
+	joined := strings.Join(args, " ")
+	return toolSummary{Title: "Ran " + truncateInline(joined)}
+}
+
+// unwrapShellArgs strips a "/bin/sh -c SCRIPT" / "bash -lc SCRIPT" wrapper,
+// re-tokenizing the inner script so classification runs against the command
+// the model meant to run, not the shim the backend wraps around it.
+func unwrapShellArgs(args []string) []string {
+	if len(args) < 3 {
+		return args
+	}
+	bin := baseBinary(args[0])
+	switch bin {
+	case "sh", "bash", "zsh", "dash", "ash":
+	default:
+		return args
+	}
+	for i := 1; i < len(args); i++ {
+		tok := args[i]
+		if strings.HasPrefix(tok, "-") {
+			continue
+		}
+		inner := shellTokens(tok)
+		if len(inner) > 0 {
+			return inner
+		}
+		return args
+	}
+	return args
+}
+
+// shellTokens splits a shell command string into argv, honoring single and
+// double quotes. It's intentionally minimal — no parameter expansion, no
+// backslash escapes beyond pass-through — which is enough for classifying
+// the command shapes we care about here.
+func shellTokens(s string) []string {
+	var out []string
+	var buf strings.Builder
+	inSingle, inDouble := false, false
+	flush := func() {
+		if buf.Len() > 0 {
+			out = append(out, buf.String())
+			buf.Reset()
+		}
+	}
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		switch {
+		case ch == '\'' && !inDouble:
+			inSingle = !inSingle
+		case ch == '"' && !inSingle:
+			inDouble = !inDouble
+		case ch == ' ' && !inSingle && !inDouble:
+			flush()
+		default:
+			buf.WriteByte(ch)
+		}
+	}
+	flush()
+	return out
+}
+
+// baseBinary returns the basename of a command like "/bin/zsh" → "zsh".
+func baseBinary(s string) string {
+	if idx := strings.LastIndexByte(s, '/'); idx >= 0 {
+		return s[idx+1:]
+	}
+	return s
+}
+
+// lastFileArg returns the final non-flag token, treating it as the file the
+// read-like command targets. Used by cat/head/tail/sed/awk classifiers.
+func lastFileArg(args []string) (string, bool) {
+	for i := len(args) - 1; i >= 0; i-- {
+		tok := args[i]
+		if tok == "" || strings.HasPrefix(tok, "-") {
+			continue
+		}
+		return strings.Trim(tok, `"'`), true
+	}
+	return "", false
+}
+
+func firstNonFlag(args []string) string {
+	for _, tok := range args {
+		if tok == "" || strings.HasPrefix(tok, "-") {
+			continue
+		}
+		return strings.Trim(tok, `"'`)
+	}
+	return ""
+}
+
+// isSedPrintOnly reports whether a sed invocation is a pure `-n '...p'`
+// excerpt, which we treat as a Read rather than a generic Ran.
+func isSedPrintOnly(args []string) bool {
+	hasN := false
+	hasPrint := false
+	for _, tok := range args {
+		if tok == "-n" {
+			hasN = true
+			continue
+		}
+		stripped := strings.Trim(tok, `"'`)
+		if strings.HasSuffix(stripped, "p") && (strings.ContainsAny(stripped, "0123456789") || strings.HasPrefix(stripped, "/")) {
+			hasPrint = true
+		}
+	}
+	return hasN && hasPrint
+}
+
+func truncateInline(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= 90 {
+		return s
+	}
+	return s[:87] + "..."
+}
+
+func summarizeToolCall(ev agent.Event) toolSummary {
 	name, _ := ev.Payload["name"].(string)
 	text := strings.TrimSpace(sanitizeHistoryMessage(ev.Text))
 	lower := strings.ToLower(name)
 
+	state := ToolOK
+	if ev.Payload != nil {
+		if _, bad := ev.Payload["error"]; bad {
+			state = ToolErr
+		}
+	}
+
+	mk := func(title, detail string) toolSummary {
+		return toolSummary{Title: strings.TrimSpace(title), Detail: strings.TrimSpace(detail), State: state}
+	}
+
 	switch lower {
 	case "read":
-		return formatToolSummary("Read", summarizeToolDetail(text))
+		return mk("Read", summarizeToolDetail(text))
 	case "glob", "list", "ls":
-		return formatToolSummary("Explored", summarizeToolDetail(text))
+		return mk("Explored", summarizeToolDetail(text))
 	case "grep", "search":
-		return formatToolSummary("Searched", summarizeToolDetail(text))
+		return mk("Searched", summarizeToolDetail(text))
 	case "bash", "command", "shell":
-		return formatToolSummary("Ran", firstLine(text))
+		return mk("Ran", firstLine(text))
 	case "write", "edit", "apply_patch", "applypatch":
-		return formatToolSummary("Edited", summarizeToolDetail(text))
+		return mk("Edited", summarizeToolDetail(text))
 	case "question":
-		return formatToolSummary("Asked", summarizeToolDetail(text))
+		return mk("Asked", summarizeToolDetail(text))
 	case "task":
-		return formatToolSummary("Delegated", summarizeToolDetail(text))
+		return mk("Delegated", summarizeToolDetail(text))
 	default:
 		if name == "" {
-			return formatToolSummary("Working", summarizeToolDetail(text))
+			return mk("Working", summarizeToolDetail(text))
 		}
-		return formatToolSummary(toTitleLabel(name), summarizeToolDetail(text))
+		return mk(toTitleLabel(name), summarizeToolDetail(text))
 	}
-}
-
-func formatToolSummary(title, detail string) string {
-	title = strings.TrimSpace(title)
-	detail = strings.TrimSpace(detail)
-	if detail == "" {
-		return title
-	}
-	return title + " " + detail
 }
 
 func summarizeToolDetail(s string) string {

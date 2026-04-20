@@ -178,11 +178,25 @@ type commandExecOutputDeltaParams struct {
 }
 
 type commandExecItem struct {
-	ID          string `json:"id"`
-	Stream      string `json:"stream,omitempty"`
-	OutputDelta string `json:"outputDelta,omitempty"`
-	Output      string `json:"aggregatedOutput,omitempty"`
-	Type        string `json:"type,omitempty"`
+	ID          string   `json:"id"`
+	Command     string   `json:"command,omitempty"`
+	CommandArr  []string `json:"commandArray,omitempty"`
+	Stream      string   `json:"stream,omitempty"`
+	OutputDelta string   `json:"outputDelta,omitempty"`
+	Output      string   `json:"aggregatedOutput,omitempty"`
+	ExitCode    *int     `json:"exitCode,omitempty"`
+	Status      string   `json:"status,omitempty"`
+	Type        string   `json:"type,omitempty"`
+}
+
+func (i commandExecItem) CommandLine() string {
+	if i.Command != "" {
+		return i.Command
+	}
+	if len(i.CommandArr) > 0 {
+		return strings.Join(i.CommandArr, " ")
+	}
+	return ""
 }
 
 type itemCompletedParams struct {
@@ -212,9 +226,23 @@ type tokenUsageBreakdown struct {
 }
 
 type completedThreadItem struct {
-	ID     string `json:"id"`
-	Type   string `json:"type,omitempty"`
-	Text   string `json:"text,omitempty"`
-	Output string `json:"aggregatedOutput,omitempty"`
-	Stream string `json:"stream,omitempty"`
+	ID         string   `json:"id"`
+	Type       string   `json:"type,omitempty"`
+	Text       string   `json:"text,omitempty"`
+	Command    string   `json:"command,omitempty"`
+	CommandArr []string `json:"commandArray,omitempty"`
+	Output     string   `json:"aggregatedOutput,omitempty"`
+	Stream     string   `json:"stream,omitempty"`
+	ExitCode   *int     `json:"exitCode,omitempty"`
+	Status     string   `json:"status,omitempty"`
+}
+
+func (i completedThreadItem) CommandLine() string {
+	if i.Command != "" {
+		return i.Command
+	}
+	if len(i.CommandArr) > 0 {
+		return strings.Join(i.CommandArr, " ")
+	}
+	return ""
 }
