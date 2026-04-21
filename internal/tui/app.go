@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand/v2"
@@ -50,13 +51,28 @@ type App struct {
 	aiCompleted        map[string]bool
 	aiTicking          map[string]bool
 	aiTurnPlaceholders map[string]string
-	aiToolTitle        map[string]string
-	aiToolDetail       map[string]string
-	aiToolState        map[string]ToolState
+	// turnPrimed records turns where we already created the "thinking" row
+	// (from turn/started or recovered on the first streamed event). Cleared on
+	// turn/completed so a burst of Codex notifications cannot skip priming.
+	turnPrimed   map[string]struct{}
+	aiToolTitle  map[string]string
+	aiToolDetail map[string]string
+	aiToolState  map[string]ToolState
+
+	// Pending server→client JSON-RPC approval (at most one). Filled from
+	// agent.EventApprovalRequired; cleared after :approve / :deny or superseded.
+	pendingRPCID json.RawMessage
+	pendingKind  string
 }
 
 const aiTypeInterval = 35 * time.Millisecond
 const aiRunesPerTick = 3
+
+// localOutboundPendingID is the stream key for the placeholder row added
+// synchronously when the user sends, before Codex streams anything. Some
+// turns never emit turn/started or tool rows; without this the chat can jump
+// straight from the user line to the final assistant text.
+const localOutboundPendingID = "local:outbound"
 
 type codexEventMsg struct{ ev agent.Event }
 type codexErrorMsg struct{ err error }
@@ -281,6 +297,7 @@ func NewApp() *App {
 		aiCompleted:        make(map[string]bool),
 		aiTicking:          make(map[string]bool),
 		aiTurnPlaceholders: make(map[string]string),
+		turnPrimed:         make(map[string]struct{}),
 		aiToolTitle:        make(map[string]string),
 		aiToolDetail:       make(map[string]string),
 		aiToolState:        make(map[string]ToolState),
@@ -332,6 +349,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case codexEventMsg:
 		return a, tea.Batch(a.subscribeAI(), a.handleCodexEvent(m.ev))
 	case codexErrorMsg:
+		a.abandonOutboundPending()
 		a.history.AppendItem(TranscriptItem{Kind: TranscriptSystem, Text: m.err.Error()}, true)
 		return a, a.subscribeAI()
 	case aiTickMsg:
@@ -441,6 +459,7 @@ func isLeaderMsg(msg tea.KeyMsg) bool {
 func (a *App) applyAction(action ActionID) tea.Cmd {
 	switch action {
 	case ActionQuit:
+		a.supersedePendingDecline(context.Background())
 		return tea.Quit
 	case ActionSwitchPane:
 		a.switchPane()
@@ -646,6 +665,7 @@ func (a *App) runCommand(input string) tea.Cmd {
 	switch name {
 	case "q", "q!":
 		a.exitCommandLine()
+		a.supersedePendingDecline(context.Background())
 		return tea.Quit
 	case "w":
 		a.exitCommandLine()
@@ -655,15 +675,16 @@ func (a *App) runCommand(input string) tea.Cmd {
 			return nil
 		}
 		a.history.AppendItem(TranscriptItem{Kind: TranscriptUser, Text: message}, true)
-		return a.sendToAI(message)
+		return mergeTeaCmd(a.beginOutboundWaitSync(), a.sendToAI(message))
 	case "wq":
 		a.exitCommandLine()
+		a.supersedePendingDecline(context.Background())
 		message := a.compose.Content()
 		a.compose.Reset()
 		var cmds []tea.Cmd
 		if strings.TrimSpace(message) != "" {
 			a.history.AppendItem(TranscriptItem{Kind: TranscriptUser, Text: message}, true)
-			cmds = append(cmds, a.sendToAI(message))
+			cmds = append(cmds, mergeTeaCmd(a.beginOutboundWaitSync(), a.sendToAI(message)))
 		}
 		cmds = append(cmds, tea.Quit)
 		return tea.Batch(cmds...)
@@ -675,6 +696,7 @@ func (a *App) runCommand(input string) tea.Cmd {
 		return a.clearStatusAfter(2 * time.Second)
 	case "new":
 		a.exitCommandLine()
+		a.supersedePendingDecline(context.Background())
 		a.history.items = nil
 		a.history.invalidateLines()
 		a.compose.Reset()
@@ -706,7 +728,7 @@ func (a *App) runCommand(input string) tea.Cmd {
 		return a.clearStatusAfter(2 * time.Second)
 	case "help":
 		a.exitCommandLine()
-		a.flashStatus("keys: i insert · : cmd · j/k scroll · gg/G top/bot · esc normal · :w send · :q quit")
+		a.flashStatus("keys: i insert · : cmd · j/k scroll · gg/G top/bot · esc normal · :w send · :q quit · :approve / :deny (pending approval)")
 		return a.clearStatusAfter(4 * time.Second)
 	case "sess":
 		a.exitCommandLine()
@@ -716,11 +738,91 @@ func (a *App) runCommand(input string) tea.Cmd {
 		a.exitCommandLine()
 		a.flashStatus("diff overlay not yet implemented")
 		return a.clearStatusAfter(2 * time.Second)
+	case "approve":
+		a.exitCommandLine()
+		return a.submitPendingApproval(args, true)
+	case "deny", "decline":
+		a.exitCommandLine()
+		return a.submitPendingApproval(nil, false)
 	default:
 		a.exitCommandLine()
 		a.flashStatus("E492: not a kata command: " + name)
 		return a.clearStatusAfter(3 * time.Second)
 	}
+}
+
+func (a *App) clearPendingApproval() {
+	a.pendingRPCID = nil
+	a.pendingKind = ""
+}
+
+func (a *App) supersedePendingDecline(ctx context.Context) {
+	if len(a.pendingRPCID) == 0 {
+		return
+	}
+	if res, ok := approvalDeclineResult(a.pendingKind); ok {
+		id := append(json.RawMessage(nil), a.pendingRPCID...)
+		_ = a.ai.RespondServerRPC(ctx, id, res)
+	}
+	a.clearPendingApproval()
+}
+
+func (a *App) armPendingApproval(ev agent.Event) {
+	if len(ev.RPCID) == 0 {
+		return
+	}
+	ctx := context.Background()
+	if len(a.pendingRPCID) > 0 {
+		a.supersedePendingDecline(ctx)
+	}
+	var kind string
+	if ev.Payload != nil {
+		kind, _ = ev.Payload["approvalKind"].(string)
+	}
+	a.pendingRPCID = append(json.RawMessage(nil), ev.RPCID...)
+	a.pendingKind = kind
+}
+
+func (a *App) submitPendingApproval(args []string, accept bool) tea.Cmd {
+	ctx := context.Background()
+	if len(a.pendingRPCID) == 0 {
+		a.flashStatus("E518: no pending approval")
+		return a.clearStatusAfter(2 * time.Second)
+	}
+	kind := a.pendingKind
+	id := append(json.RawMessage(nil), a.pendingRPCID...)
+	var result any
+	var ok bool
+	if accept {
+		session := len(args) > 0 && strings.EqualFold(args[0], "session")
+		if session {
+			result, ok = approvalAcceptSessionResult(kind)
+		} else {
+			result, ok = approvalAcceptResult(kind)
+		}
+	} else {
+		result, ok = approvalDeclineResult(kind)
+	}
+	if !ok {
+		a.flashStatus("E497: :approve not supported for " + kind + " (needs structured reply)")
+		return a.clearStatusAfter(3 * time.Second)
+	}
+	if err := a.ai.RespondServerRPC(ctx, id, result); err != nil {
+		a.clearPendingApproval()
+		if errors.Is(err, agent.ErrRPCResponderUnsupported) {
+			a.flashStatus("backend cannot send approval replies")
+		} else {
+			a.history.AppendItem(TranscriptItem{Kind: TranscriptError, Text: sanitizeText(err.Error())}, true)
+		}
+		return a.clearStatusAfter(3 * time.Second)
+	}
+	a.clearPendingApproval()
+	if accept {
+		a.flashStatus("approved")
+	} else {
+		a.flashStatus("declined")
+	}
+	return a.clearStatusAfter(1500 * time.Millisecond)
 }
 
 // flashStatus sets a transient status-line notice.
@@ -781,19 +883,28 @@ func (a *App) handleCodexEvent(ev agent.Event) tea.Cmd {
 	case agent.EventTurnStarted:
 		return a.startAIThinking(ev.TurnID)
 	case agent.EventAgentDelta:
+		c1 := a.startAIThinking(ev.TurnID)
 		a.adoptThinkingPlaceholder(ev.TurnID, ev.ItemID)
-		return a.upsertAIStream(ev.ItemID, aiTypeResponse, ev.Text, false)
+		c2 := a.upsertAIStream(ev.ItemID, aiTypeResponse, ev.Text, false)
+		return mergeTeaCmd(c1, c2)
 	case agent.EventAgentCompleted:
+		c1 := a.startAIThinking(ev.TurnID)
 		a.adoptThinkingPlaceholder(ev.TurnID, ev.ItemID)
-		return a.upsertAIStream(ev.ItemID, aiTypeResponse, ev.Text, true)
+		c2 := a.upsertAIStream(ev.ItemID, aiTypeResponse, ev.Text, true)
+		return mergeTeaCmd(c1, c2)
 	case agent.EventToolCall:
-		return a.setToolCallSummary(ev.ItemID, summarizeToolCall(ev), true)
+		c1 := a.startAIThinking(ev.TurnID)
+		c2 := a.setToolCallSummary(ev.ItemID, summarizeToolCall(ev), true)
+		return mergeTeaCmd(c1, c2)
 	case agent.EventCommandOutput:
 		return a.handleCommandExecution(ev)
 	case agent.EventTokenUsage:
 		a.applyTokenUsage(ev.Payload)
 		return nil
 	case agent.EventTurnCompleted:
+		if ev.TurnID != "" {
+			delete(a.turnPrimed, ev.TurnID)
+		}
 		if ev.Payload != nil {
 			if errVal, ok := ev.Payload["error"]; ok {
 				a.history.AppendItem(TranscriptItem{Kind: TranscriptError, Text: sanitizeText(fmt.Sprint(errVal))}, true)
@@ -806,13 +917,166 @@ func (a *App) handleCodexEvent(ev agent.Event) tea.Cmd {
 		}
 		return tea.Batch(cmds...)
 	case agent.EventError:
+		a.abandonOutboundPending()
 		if ev.Payload != nil {
 			if msg, ok := ev.Payload["error"].(string); ok {
 				a.history.AppendItem(TranscriptItem{Kind: TranscriptError, Text: sanitizeText(msg)}, true)
 			}
 		}
+	case agent.EventApprovalRequired:
+		a.armPendingApproval(ev)
+		// Surface a system line; resolve with :approve / :deny (see :help).
+		msg := "Approval required"
+		if ev.Payload != nil {
+			// Stable key emitted by codex server_request (approvalKind).
+			if k, _ := ev.Payload["approvalKind"].(string); k != "" {
+				msg = "Approval required (" + k + ")"
+			}
+		}
+		if t := strings.TrimSpace(ev.Text); t != "" {
+			msg = msg + ": " + t
+		}
+		a.history.AppendItem(TranscriptItem{Kind: TranscriptSystem, Text: sanitizeText(msg)}, true)
 	}
 	return nil
+}
+
+// mergeTeaCmd combines two Bubble Tea commands, dropping nils.
+func mergeTeaCmd(a, b tea.Cmd) tea.Cmd {
+	switch {
+	case a == nil:
+		return b
+	case b == nil:
+		return a
+	default:
+		return tea.Batch(a, b)
+	}
+}
+
+func (a *App) teardownAIStreamKeys(itemID string) {
+	delete(a.aiStreams, itemID)
+	delete(a.aiRendered, itemID)
+	delete(a.aiVerbIdx, itemID)
+	delete(a.aiWaitFrames, itemID)
+	delete(a.aiTypes, itemID)
+	delete(a.aiCompleted, itemID)
+	delete(a.aiTicking, itemID)
+	delete(a.aiToolTitle, itemID)
+	delete(a.aiToolDetail, itemID)
+	delete(a.aiToolState, itemID)
+}
+
+func (a *App) spliceHistoryRemove(idx int) {
+	if idx < 0 || idx >= len(a.history.items) {
+		return
+	}
+	a.history.items = append(a.history.items[:idx], a.history.items[idx+1:]...)
+	if idx < len(a.history.renderCache) {
+		a.history.renderCache = append(a.history.renderCache[:idx], a.history.renderCache[idx+1:]...)
+	} else if len(a.history.renderCache) > len(a.history.items) {
+		a.history.renderCache = a.history.renderCache[:len(a.history.items)]
+	}
+	for id, i := range a.aiIndexes {
+		if i > idx {
+			a.aiIndexes[id] = i - 1
+		}
+	}
+	a.history.invalidateLines()
+}
+
+// abandonOutboundPending drops the pre-Codex "waiting" row if it is still
+// present (e.g. RPC error before any streamed events).
+func (a *App) abandonOutboundPending() {
+	idx, ok := a.aiIndexes[localOutboundPendingID]
+	if !ok {
+		return
+	}
+	delete(a.aiIndexes, localOutboundPendingID)
+	a.teardownAIStreamKeys(localOutboundPendingID)
+	a.spliceHistoryRemove(idx)
+}
+
+// migrateAIStreamKeys renames per-item stream state from one id to another
+// (same history row index).
+func (a *App) migrateAIStreamKeys(from, to string) {
+	if from == to {
+		return
+	}
+	if idx, ok := a.aiIndexes[from]; ok {
+		delete(a.aiIndexes, from)
+		a.aiIndexes[to] = idx
+	}
+	if v, ok := a.aiStreams[from]; ok {
+		a.aiStreams[to] = v
+		delete(a.aiStreams, from)
+	}
+	if v, ok := a.aiRendered[from]; ok {
+		a.aiRendered[to] = v
+		delete(a.aiRendered, from)
+	}
+	if v, ok := a.aiVerbIdx[from]; ok {
+		a.aiVerbIdx[to] = v
+		delete(a.aiVerbIdx, from)
+	}
+	if v, ok := a.aiWaitFrames[from]; ok {
+		a.aiWaitFrames[to] = v
+		delete(a.aiWaitFrames, from)
+	}
+	if v, ok := a.aiTypes[from]; ok {
+		a.aiTypes[to] = v
+		delete(a.aiTypes, from)
+	}
+	if v, ok := a.aiCompleted[from]; ok {
+		a.aiCompleted[to] = v
+		delete(a.aiCompleted, from)
+	}
+	delete(a.aiTicking, from)
+	a.aiTicking[to] = false
+	if v, ok := a.aiToolTitle[from]; ok {
+		a.aiToolTitle[to] = v
+		delete(a.aiToolTitle, from)
+	}
+	if v, ok := a.aiToolDetail[from]; ok {
+		a.aiToolDetail[to] = v
+		delete(a.aiToolDetail, from)
+	}
+	if v, ok := a.aiToolState[from]; ok {
+		a.aiToolState[to] = v
+		delete(a.aiToolState, from)
+	}
+}
+
+// beginOutboundWaitSync runs in the same Update as :w — before sendToAI's
+// command — so the user always sees an immediate waiting row.
+func (a *App) beginOutboundWaitSync() tea.Cmd {
+	id := localOutboundPendingID
+	if _, exists := a.aiIndexes[id]; exists {
+		delete(a.aiVerbIdx, id)
+		delete(a.aiWaitFrames, id)
+		a.ensureWaitingVerb(id)
+		a.renderAIStream(id)
+		if a.aiTicking[id] {
+			return nil
+		}
+		a.aiTicking[id] = true
+		return a.scheduleAITick(id)
+	}
+
+	a.aiTypes[id] = aiTypeWaiting
+	if _, ok := a.aiRendered[id]; !ok {
+		a.aiRendered[id] = ""
+	}
+	if _, ok := a.aiStreams[id]; !ok {
+		a.aiStreams[id] = ""
+	}
+	a.aiCompleted[id] = false
+	a.ensureWaitingVerb(id)
+	a.renderAIStream(id)
+	if a.aiTicking[id] {
+		return nil
+	}
+	a.aiTicking[id] = true
+	return a.scheduleAITick(id)
 }
 
 // applyTokenUsage folds a Codex token-usage snapshot into the statusline
@@ -904,6 +1168,9 @@ func (a *App) upsertAIStream(itemID string, label TranscriptKind, delta string, 
 }
 
 func (a *App) handleAITick(itemID string) tea.Cmd {
+	if _, ok := a.aiTypes[itemID]; !ok {
+		return nil
+	}
 	a.aiTicking[itemID] = false
 	if a.aiRendered[itemID] != a.aiStreams[itemID] {
 		a.advanceAIStream(itemID)
@@ -1044,6 +1311,26 @@ func (a *App) startAIThinking(turnID string) tea.Cmd {
 		return nil
 	}
 	itemID := "turn:" + turnID
+
+	if idx, ok := a.aiIndexes[localOutboundPendingID]; ok {
+		a.migrateAIStreamKeys(localOutboundPendingID, itemID)
+		a.aiTurnPlaceholders[turnID] = itemID
+		it := a.history.items[idx]
+		it.ID = itemID
+		a.history.UpdateItemAt(idx, it, true)
+		a.turnPrimed[turnID] = struct{}{}
+		a.renderAIStream(itemID)
+		if a.aiTicking[itemID] {
+			return nil
+		}
+		a.aiTicking[itemID] = true
+		return a.scheduleAITick(itemID)
+	}
+
+	if _, ok := a.turnPrimed[turnID]; ok {
+		return nil
+	}
+	a.turnPrimed[turnID] = struct{}{}
 	a.aiTurnPlaceholders[turnID] = itemID
 	a.aiTypes[itemID] = aiTypeWaiting
 	if _, ok := a.aiRendered[itemID]; !ok {
@@ -1180,7 +1467,9 @@ func (a *App) handleCommandExecution(ev agent.Event) tea.Cmd {
 		summary = classifyCommand(cmdLine)
 	}
 	summary.State = state
-	return a.setToolCallSummary(ev.ItemID, summary, final)
+	c1 := a.startAIThinking(ev.TurnID)
+	c2 := a.setToolCallSummary(ev.ItemID, summary, final)
+	return mergeTeaCmd(c1, c2)
 }
 
 // classifyCommand turns a raw shell command line into a single-line tool
@@ -1380,6 +1669,8 @@ func summarizeToolCall(ev agent.Event) toolSummary {
 	switch lower {
 	case "read":
 		return mk("Read", summarizeToolDetail(text))
+	case "web_search", "websearch":
+		return mk("Web search", summarizeToolDetail(text))
 	case "glob", "list", "ls":
 		return mk("Explored", summarizeToolDetail(text))
 	case "grep", "search":
@@ -1542,21 +1833,22 @@ func (a *App) renderCommandInput() string {
 func (a *App) chromeSnapshot() chromeSnapshot {
 	cwd, _ := os.Getwd()
 	return chromeSnapshot{
-		theme:     a.theme,
-		width:     a.width,
-		path:      shortPath(cwd),
-		title:     a.title,
-		sessionID: a.sessionID,
-		mode:      a.mode,
-		scope:     a.scopeLabel(),
-		branch:    a.branch,
-		provider:  a.provider,
-		model:     a.model,
-		ctxUsed:   a.ctxUsed,
-		ctxTotal:  a.ctxTotal,
-		msgCount:  len(a.history.items),
-		notice:    a.statusNotice,
-		lineCol:   a.lineColLabel(),
+		theme:           a.theme,
+		width:           a.width,
+		path:            shortPath(cwd),
+		title:           a.title,
+		sessionID:       a.sessionID,
+		mode:            a.mode,
+		scope:           a.scopeLabel(),
+		branch:          a.branch,
+		provider:        a.provider,
+		model:           a.model,
+		ctxUsed:         a.ctxUsed,
+		ctxTotal:        a.ctxTotal,
+		msgCount:        len(a.history.items),
+		notice:          a.statusNotice,
+		lineCol:         a.lineColLabel(),
+		pendingApproval: len(a.pendingRPCID) > 0,
 	}
 }
 

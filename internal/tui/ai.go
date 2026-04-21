@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 
 	"github.com/boatnoah/kata/internal/agent"
@@ -15,16 +16,26 @@ import (
 type AIManager struct {
 	provider  string
 	client    agent.Provider
+	rpc       agent.RPCResponder
 	startOnce sync.Once
 	startErr  error
 }
 
 func newAIManager() *AIManager {
-	return &AIManager{provider: "codex", client: codex.NewClient()}
+	c := codex.NewClient()
+	m := &AIManager{provider: "codex", client: c}
+	if rr, ok := any(c).(agent.RPCResponder); ok {
+		m.rpc = rr
+	}
+	return m
 }
 
 func newAIManagerWithClient(c agent.Provider) *AIManager {
-	return &AIManager{provider: "codex", client: c}
+	m := &AIManager{provider: "codex", client: c}
+	if rr, ok := any(c).(agent.RPCResponder); ok {
+		m.rpc = rr
+	}
+	return m
 }
 
 // Provider reports the backend label shown in the statusline (e.g. "codex").
@@ -70,4 +81,14 @@ func (m *AIManager) Close() error {
 		return nil
 	}
 	return m.client.Close()
+}
+
+// RespondServerRPC forwards a JSON-RPC result for a pending server request
+// (see agent.Event.RPCID). Returns agent.ErrRPCResponderUnsupported when the
+// backend cannot reply on the wire.
+func (m *AIManager) RespondServerRPC(ctx context.Context, id json.RawMessage, result any) error {
+	if m.rpc == nil {
+		return agent.ErrRPCResponderUnsupported
+	}
+	return m.rpc.RespondServerRPC(ctx, id, result)
 }

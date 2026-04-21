@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -8,6 +10,114 @@ import (
 
 	"github.com/boatnoah/kata/internal/agent"
 )
+
+// stubAgentProvider implements agent.Provider and agent.RPCResponder for tests.
+type stubAgentProvider struct {
+	ev     chan agent.Event
+	lastID json.RawMessage
+	last   any
+	err    error
+}
+
+func (s *stubAgentProvider) Start(context.Context) error { return nil }
+
+func (s *stubAgentProvider) SendText(context.Context, string) (string, error) { return "", nil }
+
+func (s *stubAgentProvider) Events() <-chan agent.Event {
+	if s.ev == nil {
+		return nil
+	}
+	return s.ev
+}
+
+func (s *stubAgentProvider) Model() string { return "stub-model" }
+
+func (s *stubAgentProvider) Close() error { return nil }
+
+func (s *stubAgentProvider) RespondServerRPC(_ context.Context, id json.RawMessage, result any) error {
+	s.lastID = append(json.RawMessage(nil), id...)
+	s.last = result
+	return s.err
+}
+
+type noRPCAgentProvider struct{}
+
+func (noRPCAgentProvider) Start(context.Context) error { return nil }
+
+func (noRPCAgentProvider) SendText(context.Context, string) (string, error) { return "", nil }
+
+func (noRPCAgentProvider) Events() <-chan agent.Event { return nil }
+
+func (noRPCAgentProvider) Model() string { return "" }
+
+func (noRPCAgentProvider) Close() error { return nil }
+
+func TestApproveSendsAcceptResult(t *testing.T) {
+	t.Parallel()
+	stub := &stubAgentProvider{}
+	app := NewApp()
+	app.ai = newAIManagerWithClient(stub)
+	app.provider = app.ai.Provider()
+	app.model = app.ai.Model()
+	app.pendingRPCID = json.RawMessage(`42`)
+	app.pendingKind = approvalKindCommandExecution
+
+	_ = app.runCommand("approve")
+	if string(stub.lastID) != `42` {
+		t.Fatalf("rpc id %q", stub.lastID)
+	}
+	m, ok := stub.last.(map[string]any)
+	if !ok || m["decision"] != "accept" {
+		t.Fatalf("want decision accept, got %#v", stub.last)
+	}
+	if len(app.pendingRPCID) != 0 {
+		t.Fatalf("pending should clear, got %q", app.pendingRPCID)
+	}
+}
+
+func TestApproveSessionSendsAcceptForSession(t *testing.T) {
+	t.Parallel()
+	stub := &stubAgentProvider{}
+	app := NewApp()
+	app.ai = newAIManagerWithClient(stub)
+	app.pendingRPCID = json.RawMessage(`1`)
+	app.pendingKind = approvalKindFileChange
+	_ = app.runCommand("approve session")
+	m := stub.last.(map[string]any)
+	if m["decision"] != "acceptForSession" {
+		t.Fatalf("got %#v", m)
+	}
+}
+
+func TestDenySendsDecline(t *testing.T) {
+	t.Parallel()
+	stub := &stubAgentProvider{}
+	app := NewApp()
+	app.ai = newAIManagerWithClient(stub)
+	app.pendingRPCID = json.RawMessage(`2`)
+	app.pendingKind = approvalKindCommandExecution
+	_ = app.runCommand("deny")
+	m := stub.last.(map[string]any)
+	if m["decision"] != "decline" {
+		t.Fatalf("got %#v", m)
+	}
+}
+
+func TestApproveUnsupportedKindDoesNotCallRPC(t *testing.T) {
+	t.Parallel()
+	stub := &stubAgentProvider{}
+	app := NewApp()
+	app.ai = newAIManagerWithClient(stub)
+	app.pendingRPCID = json.RawMessage(`3`)
+	app.pendingKind = approvalKindPermissions
+	_ = app.runCommand("approve")
+	if stub.last != nil {
+		t.Fatalf("expected no rpc, got %#v", stub.last)
+	}
+	if len(app.pendingRPCID) == 0 {
+		t.Fatal("pending should remain when :approve is unsupported")
+	}
+}
 
 func drainAIStream(app *App, itemID string) {
 	for app.aiTicking[itemID] || app.aiRendered[itemID] != app.aiStreams[itemID] {
@@ -21,6 +131,17 @@ func lastHistoryItem(t *testing.T, app *App) TranscriptItem {
 		t.Fatalf("expected history item")
 	}
 	return app.history.items[len(app.history.items)-1]
+}
+
+func lastUserHistoryItem(t *testing.T, app *App) TranscriptItem {
+	t.Helper()
+	for i := len(app.history.items) - 1; i >= 0; i-- {
+		if app.history.items[i].Kind == TranscriptUser {
+			return app.history.items[i]
+		}
+	}
+	t.Fatalf("expected a user transcript item in history")
+	return TranscriptItem{}
 }
 
 func TestLeaderFocusCompose(t *testing.T) {
@@ -137,9 +258,9 @@ func TestWriteCommandSendsComposeToHistory(t *testing.T) {
 	if got := app.compose.Content(); got != "" {
 		t.Fatalf("expected compose to clear after write, got %q", got)
 	}
-	item := lastHistoryItem(t, app)
-	if item.Kind != TranscriptUser || item.Text != "hello world" {
-		t.Fatalf("expected user transcript item, got %+v", item)
+	item := lastUserHistoryItem(t, app)
+	if item.Text != "hello world" {
+		t.Fatalf("expected user transcript text, got %+v", item)
 	}
 }
 
@@ -171,7 +292,6 @@ func TestUpsertAIStreamCompletedUsesAuthoritativeFinalText(t *testing.T) {
 		t.Fatalf("expected final AI message without duplication, got %+v", item)
 	}
 }
-
 
 func TestUpsertAIStreamRevealsTextProgressively(t *testing.T) {
 	app := NewApp()
@@ -489,4 +609,3 @@ func TestHandleCodexEventMarksFailedCommand(t *testing.T) {
 		t.Fatalf("expected aiTypes cleared after finalize")
 	}
 }
-

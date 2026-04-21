@@ -15,6 +15,18 @@ import (
 	"github.com/boatnoah/kata/internal/agent"
 )
 
+// maxJSONLToken caps one newline-delimited JSON line from codex. The default
+// bufio.Scanner limit is 64KiB; larger notifications (e.g. big agent payloads)
+// trigger "bufio.Scanner: token too long" without this.
+const maxJSONLToken = 16 << 20 // 16 MiB
+
+func newJSONLScanner(r io.Reader) *bufio.Scanner {
+	s := bufio.NewScanner(r)
+	buf := make([]byte, 0, 256*1024)
+	s.Buffer(buf, maxJSONLToken)
+	return s
+}
+
 // Client manages a Codex app-server subprocess over JSON-RPC (JSONL over stdio).
 // It performs the initialize/initialized handshake, starts or resumes a thread,
 // and streams notifications (agent thinking, tool calls, command output, etc.)
@@ -206,7 +218,7 @@ func (c *Client) startTurn(ctx context.Context, text string) (string, error) {
 }
 
 func (c *Client) readLoop() {
-	scanner := bufio.NewScanner(c.stdout)
+	scanner := newJSONLScanner(c.stdout)
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		var msg rpcMessage
@@ -215,6 +227,10 @@ func (c *Client) readLoop() {
 			continue
 		}
 		if len(msg.ID) > 0 {
+			if isServerInitiatedJSONRPCRequest(msg) {
+				c.handleServerRequest(msg)
+				continue
+			}
 			c.dispatchResponse(msg)
 			continue
 		}
@@ -228,7 +244,7 @@ func (c *Client) readLoop() {
 }
 
 func (c *Client) readStderr() {
-	scanner := bufio.NewScanner(c.stderr)
+	scanner := newJSONLScanner(c.stderr)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.TrimSpace(line) == "" {
@@ -360,11 +376,10 @@ func (c *Client) handleNotification(msg rpcMessage) {
 }
 
 func (c *Client) emit(ev agent.Event) {
-	select {
-	case c.eventsCh <- ev:
-	default:
-		// drop if slow consumer to avoid blocking the transport loop
-	}
+	// Always deliver — never drop. A non-blocking channel with a "default"
+	// branch could lose turn/tool notifications in bursts, which makes the TUI
+	// jump straight from the user line to the final reply.
+	c.eventsCh <- ev
 }
 
 func (c *Client) emitError(err error) {

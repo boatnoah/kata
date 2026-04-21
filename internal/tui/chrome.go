@@ -14,22 +14,23 @@ import (
 // via a small snapshot so this stays pure presentation.
 
 type chromeSnapshot struct {
-	theme     Theme
-	width     int
-	path      string
-	title     string
-	sessionID string
-	mode      Mode
-	scope     string
-	branch    string
-	provider  string
-	model     string
-	ctxUsed   int
-	ctxTotal  int
-	msgCount  int
-	filesMod  int
-	notice    string
-	lineCol   string
+	theme           Theme
+	width           int
+	path            string
+	title           string
+	sessionID       string
+	mode            Mode
+	scope           string
+	branch          string
+	provider        string
+	model           string
+	ctxUsed         int
+	ctxTotal        int
+	msgCount        int
+	filesMod        int
+	notice          string
+	lineCol         string
+	pendingApproval bool
 }
 
 // renderTopbar produces the 1-row header: `kata · <path> · <title>   session xxxx`.
@@ -83,6 +84,9 @@ func renderStatusline(s chromeSnapshot) string {
 		}
 		if s.filesMod > 0 {
 			parts = append(parts, fmt.Sprintf("%d files modified", s.filesMod))
+		}
+		if s.pendingApproval {
+			parts = append(parts, "approval pending")
 		}
 		middle = lipgloss.NewStyle().Foreground(t.FgDim).Render(strings.Join(parts, " · "))
 	}
