@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/boatnoah/kata/internal/agent"
+	"github.com/boatnoah/kata/internal/codex"
 )
 
 type App struct {
@@ -63,6 +64,11 @@ type App struct {
 	// agent.EventApprovalRequired; cleared after :approve / :deny or superseded.
 	pendingRPCID json.RawMessage
 	pendingKind  string
+
+	// Parsed per-file changes from the most recent applyPatch approval. Kept
+	// so :diff can re-render them unbounded after the initial truncated
+	// preview scrolls out of view.
+	lastPatchFiles []agent.FileChange
 }
 
 const aiTypeInterval = 35 * time.Millisecond
@@ -728,7 +734,7 @@ func (a *App) runCommand(input string) tea.Cmd {
 		return a.clearStatusAfter(2 * time.Second)
 	case "help":
 		a.exitCommandLine()
-		a.flashStatus("keys: i insert · : cmd · j/k scroll · gg/G top/bot · esc normal · :w send · :q quit · :approve / :deny (pending approval)")
+		a.flashStatus("keys: i insert · : cmd · j/k scroll · gg/G top/bot · esc normal · :w send · :q quit · :approve / :deny (pending approval) · :diff (expand patch)")
 		return a.clearStatusAfter(4 * time.Second)
 	case "sess":
 		a.exitCommandLine()
@@ -736,8 +742,17 @@ func (a *App) runCommand(input string) tea.Cmd {
 		return a.clearStatusAfter(2 * time.Second)
 	case "diff":
 		a.exitCommandLine()
-		a.flashStatus("diff overlay not yet implemented")
-		return a.clearStatusAfter(2 * time.Second)
+		if len(a.lastPatchFiles) == 0 {
+			a.flashStatus("no pending patch")
+			return a.clearStatusAfter(2 * time.Second)
+		}
+		for _, f := range a.lastPatchFiles {
+			a.history.AppendItem(TranscriptItem{
+				Kind: TranscriptDiff,
+				Diff: f,
+			}, true)
+		}
+		return nil
 	case "approve":
 		a.exitCommandLine()
 		return a.submitPendingApproval(args, true)
@@ -765,6 +780,35 @@ func (a *App) supersedePendingDecline(ctx context.Context) {
 		_ = a.ai.RespondServerRPC(ctx, id, res)
 	}
 	a.clearPendingApproval()
+}
+
+// applyPatchDiffPreviewLines caps how many lines of each file's diff show
+// inline on the initial approval event. Users can expand with :diff.
+const applyPatchDiffPreviewLines = 12
+
+// appendApplyPatchDiffs inserts one TranscriptDiff item per file carried by
+// an applyPatch approval event. No-op when the event is not an applyPatch
+// or carries no parsed file changes. Stashes the parsed slice on the App so
+// :diff can re-render it unbounded later.
+func (a *App) appendApplyPatchDiffs(ev agent.Event) {
+	if ev.Payload == nil {
+		return
+	}
+	if kind, _ := ev.Payload["approvalKind"].(string); kind != codex.ApprovalKindApplyPatch {
+		return
+	}
+	files, _ := ev.Payload["parsedFileChanges"].([]agent.FileChange)
+	if len(files) == 0 {
+		return
+	}
+	a.lastPatchFiles = files
+	for _, f := range files {
+		a.history.AppendItem(TranscriptItem{
+			Kind:         TranscriptDiff,
+			Diff:         f,
+			DiffMaxLines: applyPatchDiffPreviewLines,
+		}, true)
+	}
 }
 
 func (a *App) armPendingApproval(ev agent.Event) {
@@ -937,6 +981,7 @@ func (a *App) handleCodexEvent(ev agent.Event) tea.Cmd {
 			msg = msg + ": " + t
 		}
 		a.history.AppendItem(TranscriptItem{Kind: TranscriptSystem, Text: sanitizeText(msg)}, true)
+		a.appendApplyPatchDiffs(ev)
 	}
 	return nil
 }

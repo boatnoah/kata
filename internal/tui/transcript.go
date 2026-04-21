@@ -1,5 +1,7 @@
 package tui
 
+import "github.com/boatnoah/kata/internal/agent"
+
 type TranscriptKind string
 
 const (
@@ -9,6 +11,7 @@ const (
 	TranscriptThinking  TranscriptKind = "thinking"
 	TranscriptSystem    TranscriptKind = "system"
 	TranscriptError     TranscriptKind = "error"
+	TranscriptDiff      TranscriptKind = "diff"
 )
 
 // ToolState controls the color of the tool-call glyph in ToolBlock rendering.
@@ -33,4 +36,9 @@ type TranscriptItem struct {
 	Title  string
 	Detail string
 	Tool   ToolState
+
+	// Diff carries the single-file patch payload for TranscriptDiff items.
+	// DiffMaxLines caps the inline preview; 0 means unlimited.
+	Diff         agent.FileChange
+	DiffMaxLines int
 }

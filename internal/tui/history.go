@@ -81,7 +81,7 @@ func (h *HistoryScreen) SetActive(active bool) {
 
 func (h *HistoryScreen) AppendItem(item TranscriptItem, _ bool) int {
 	item.Text = sanitizeHistoryMessage(item.Text)
-	if item.Text == "" && item.Kind != TranscriptThinking && item.Kind != TranscriptTool {
+	if item.Text == "" && item.Kind != TranscriptThinking && item.Kind != TranscriptTool && item.Kind != TranscriptDiff {
 		return len(h.items) - 1
 	}
 	h.items = append(h.items, item)
@@ -642,6 +642,8 @@ func itemBlocksWithRole(item TranscriptItem, role ToolRole) []Block {
 			title = firstLine(item.Text)
 		}
 		return []Block{ToolBlock{Title: title, Detail: detail, State: item.Tool, Role: role}}
+	case TranscriptDiff:
+		return []Block{DiffBlock{File: item.Diff, MaxLines: item.DiffMaxLines}}
 	case TranscriptError:
 		return []Block{ErrorBlock{Text: item.Text}}
 	case TranscriptSystem:
