@@ -56,6 +56,55 @@ jobs:
                   errors.push(`PR body must include a \`${snippet}\` section (from the PR template).`);
                 }
               }
+ 
+              // Disallow AI attribution trailers in the PR body.
+              // We keep PR descriptions focused on the change and test plan.
+              const aiTrailerPatterns = [
+                /co-authored-by:\s*.*(claude|claude\s*code|openai|chatgpt|copilot|cursor).*/i,
+                /generated\s+by\s+.*(claude|claude\s*code|openai|chatgpt|copilot|cursor).*/i,
+                /(claude\s*code|chatgpt|openai|copilot|cursor)\s*:\s*.*$/i,
+              ];
+              const lines = body.split(/\r?\n/);
+              for (const [idx, line] of lines.entries()) {
+                for (const re of aiTrailerPatterns) {
+                  if (re.test(line)) {
+                    errors.push(
+                      `PR body contains an AI attribution trailer on line ${idx + 1}; please remove it.`
+                    );
+                    break;
+                  }
+                }
+              }
+
+              // Disallow AI attribution trailers in PR commit messages too.
+              try {
+                const { owner, repo } = context.repo;
+                const commits = await github.paginate(github.rest.pulls.listCommits, {
+                  owner,
+                  repo,
+                  pull_number: pr.number,
+                  per_page: 100,
+                });
+                for (const c of commits) {
+                  const msg = c?.commit?.message || "";
+                  const firstLine = msg.split(/\r?\n/)[0] || "";
+                  const msgLines = msg.split(/\r?\n/);
+                  for (const line of msgLines) {
+                    for (const re of aiTrailerPatterns) {
+                      if (re.test(line)) {
+                        errors.push(
+                          `Commit ${c.sha.slice(0, 7)} (${JSON.stringify(
+                            firstLine
+                          )}) contains an AI attribution trailer; please remove it.`
+                        );
+                        break;
+                      }
+                    }
+                  }
+                }
+              } catch (e) {
+                errors.push(`Failed to inspect PR commits for trailers: ${e.message || e}`);
+              }
             }
 
             if (errors.length) {
