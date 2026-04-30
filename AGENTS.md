@@ -1,0 +1,19 @@
+# AGENTS.md
+
+## Agent skills
+
+### Issue tracker
+
+Issues live as markdown files under `.scratch/<feature>/`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default canonical vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
+## Commit style
+
+Use [Conventional Commits](https://www.conventionalcommits.org/). Keep the subject line under 72 characters. Scope is encouraged when the change is localized (e.g. `feat(tui): …`, `refactor(agent): …`).
