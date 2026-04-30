@@ -56,6 +56,25 @@ jobs:
                   errors.push(`PR body must include a \`${snippet}\` section (from the PR template).`);
                 }
               }
+
+              // Disallow AI attribution trailers in the PR body.
+              // We keep PR descriptions focused on the change and test plan.
+              const aiTrailerPatterns = [
+                /co-authored-by:\s*.*(claude|claude\s*code|openai|chatgpt|copilot|cursor).*/i,
+                /generated\s+by\s+.*(claude|claude\s*code|openai|chatgpt|copilot|cursor).*/i,
+                /(claude\s*code|chatgpt|openai|copilot|cursor)\s*:\s*.*$/i,
+              ];
+              const lines = body.split(/\r?\n/);
+              for (const [idx, line] of lines.entries()) {
+                for (const re of aiTrailerPatterns) {
+                  if (re.test(line)) {
+                    errors.push(
+                      `PR body contains an AI attribution trailer on line ${idx + 1}; please remove it.`
+                    );
+                    break;
+                  }
+                }
+              }
             }
 
             if (errors.length) {
