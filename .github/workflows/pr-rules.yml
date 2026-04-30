@@ -77,6 +77,36 @@ jobs:
               }
             }
 
+            // Disallow AI attribution trailers in PR commit messages too.
+            try {
+              const { owner, repo } = context.repo;
+              const commits = await github.paginate(github.rest.pulls.listCommits, {
+                owner,
+                repo,
+                pull_number: pr.number,
+                per_page: 100,
+              });
+              for (const c of commits) {
+                const msg = c?.commit?.message || "";
+                const firstLine = msg.split(/\r?\n/)[0] || "";
+                const msgLines = msg.split(/\r?\n/);
+                for (const line of msgLines) {
+                  for (const re of aiTrailerPatterns) {
+                    if (re.test(line)) {
+                      errors.push(
+                        `Commit ${c.sha.slice(0, 7)} (${JSON.stringify(
+                          firstLine
+                        )}) contains an AI attribution trailer; please remove it.`
+                      );
+                      break;
+                    }
+                  }
+                }
+              }
+            } catch (e) {
+              errors.push(`Failed to inspect PR commits for trailers: ${e.message || e}`);
+            }
+
             if (errors.length) {
               core.setFailed(errors.join("\n"));
             }
