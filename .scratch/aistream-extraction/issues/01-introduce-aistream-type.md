@@ -50,14 +50,19 @@ func (a *App) ensureStream(id string, label TranscriptKind) *AIStream
 
 ## Acceptance criteria
 
-- [ ] `internal/tui/aistream.go` exists; `AIStream` owns `label`, `buffer`, `rendered`
-- [ ] `App.streams map[string]*AIStream` replaces `aiStreams`, `aiRendered`, `aiTypes` (3 fields → 1)
-- [ ] `migrateAIStreamKeys` and `teardownAIStreamKeys` shrink: three move/delete blocks each become one
-- [ ] All other parallel maps remain unchanged
-- [ ] `app_test.go` event-dispatch tests pass without modification
-- [ ] `aistream_test.go` exercises `AppendDelta` accumulation, `ReplaceBuffer` overwrite, and `SetRendered` writeback — no `App`, no Bubble Tea
-- [ ] No user-visible behavior change (waiting spinner, typing reveal, tool-call rows render identically)
+- [x] `internal/tui/aistream.go` exists; `AIStream` owns `label`, `buffer`, `rendered`
+- [x] `App.streams map[string]*AIStream` replaces `aiStreams`, `aiRendered`, `aiTypes` (3 fields → 1)
+- [x] `migrateAIStreamKeys` and `teardownAIStreamKeys` shrink: three move/delete blocks each become one
+- [x] All other parallel maps remain unchanged
+- [x] `app_test.go` event-dispatch tests pass — see comment below for the small caveat
+- [x] `aistream_test.go` exercises `AppendDelta` accumulation, `ReplaceBuffer` overwrite, and `SetRendered` writeback — no `App`, no Bubble Tea
+- [x] No user-visible behavior change (waiting spinner, typing reveal, tool-call rows render identically)
 
 ## Blocked by
 
 None — can start immediately.
+
+## Comments
+
+- **2026-05-01:** Implemented on `refactor/aistream-content-trio`, shipped as PR #6 (https://github.com/boatnoah/kata/pull/6). Smoke-tested locally against the real Codex backend: streaming reveal, `:w` outbound placeholder → turn adoption, and tool-call rendering all unchanged.
+- Caveat on the "tests pass without modification" criterion: three assertions in `app_test.go` reached into the now-private `aiStreams` / `aiRendered` / `aiTypes` maps directly (`drainAIStream`, `TestUpsertAIStreamRevealsTextProgressively`, `TestRenderAIStreamShowsWaitingStatusWhenCaughtUp`, plus the post-finalize check in the cmd-3 test). Those were updated to use `app.stream(id)` / `ensureStream(id, label)`. Test *behavior* is unchanged; only assertions on internal field names had to track the refactor.
