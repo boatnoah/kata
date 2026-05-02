@@ -43,12 +43,10 @@ type App struct {
 	ctxUsed            int
 	ctxTotal           int
 	ai                 *AIManager
-	aiStreams          map[string]string
-	aiRendered         map[string]string
+	streams            map[string]*AIStream
 	aiIndexes          map[string]int
 	aiVerbIdx          map[string]int
 	aiWaitFrames       map[string]int
-	aiTypes            map[string]TranscriptKind
 	aiCompleted        map[string]bool
 	aiTicking          map[string]bool
 	aiTurnPlaceholders map[string]string
@@ -294,12 +292,10 @@ func NewApp() *App {
 		branch:             detectBranch(),
 		ctxTotal:           200_000,
 		ai:                 newAIManager(),
-		aiStreams:          make(map[string]string),
-		aiRendered:         make(map[string]string),
+		streams:            make(map[string]*AIStream),
 		aiIndexes:          make(map[string]int),
 		aiVerbIdx:          make(map[string]int),
 		aiWaitFrames:       make(map[string]int),
-		aiTypes:            make(map[string]TranscriptKind),
 		aiCompleted:        make(map[string]bool),
 		aiTicking:          make(map[string]bool),
 		aiTurnPlaceholders: make(map[string]string),
@@ -956,8 +952,8 @@ func (a *App) handleCodexEvent(ev agent.Event) tea.Cmd {
 		}
 		// Finalize any active streams.
 		var cmds []tea.Cmd
-		for id, label := range a.aiTypes {
-			cmds = append(cmds, a.upsertAIStream(id, label, "", true))
+		for id, s := range a.streams {
+			cmds = append(cmds, a.upsertAIStream(id, s.Label(), "", true))
 		}
 		return tea.Batch(cmds...)
 	case agent.EventError:
@@ -999,16 +995,30 @@ func mergeTeaCmd(a, b tea.Cmd) tea.Cmd {
 }
 
 func (a *App) teardownAIStreamKeys(itemID string) {
-	delete(a.aiStreams, itemID)
-	delete(a.aiRendered, itemID)
+	delete(a.streams, itemID)
 	delete(a.aiVerbIdx, itemID)
 	delete(a.aiWaitFrames, itemID)
-	delete(a.aiTypes, itemID)
 	delete(a.aiCompleted, itemID)
 	delete(a.aiTicking, itemID)
 	delete(a.aiToolTitle, itemID)
 	delete(a.aiToolDetail, itemID)
 	delete(a.aiToolState, itemID)
+}
+
+// stream returns the AIStream for itemID, or nil if absent.
+func (a *App) stream(itemID string) *AIStream { return a.streams[itemID] }
+
+// ensureStream returns the AIStream for itemID, creating one with the given
+// label if absent. The label is set on the returned stream regardless.
+func (a *App) ensureStream(itemID string, label TranscriptKind) *AIStream {
+	s, ok := a.streams[itemID]
+	if !ok {
+		s = newAIStream(label)
+		a.streams[itemID] = s
+		return s
+	}
+	s.SetLabel(label)
+	return s
 }
 
 func (a *App) spliceHistoryRemove(idx int) {
@@ -1051,13 +1061,9 @@ func (a *App) migrateAIStreamKeys(from, to string) {
 		delete(a.aiIndexes, from)
 		a.aiIndexes[to] = idx
 	}
-	if v, ok := a.aiStreams[from]; ok {
-		a.aiStreams[to] = v
-		delete(a.aiStreams, from)
-	}
-	if v, ok := a.aiRendered[from]; ok {
-		a.aiRendered[to] = v
-		delete(a.aiRendered, from)
+	if s, ok := a.streams[from]; ok {
+		a.streams[to] = s
+		delete(a.streams, from)
 	}
 	if v, ok := a.aiVerbIdx[from]; ok {
 		a.aiVerbIdx[to] = v
@@ -1066,10 +1072,6 @@ func (a *App) migrateAIStreamKeys(from, to string) {
 	if v, ok := a.aiWaitFrames[from]; ok {
 		a.aiWaitFrames[to] = v
 		delete(a.aiWaitFrames, from)
-	}
-	if v, ok := a.aiTypes[from]; ok {
-		a.aiTypes[to] = v
-		delete(a.aiTypes, from)
 	}
 	if v, ok := a.aiCompleted[from]; ok {
 		a.aiCompleted[to] = v
@@ -1107,13 +1109,7 @@ func (a *App) beginOutboundWaitSync() tea.Cmd {
 		return a.scheduleAITick(id)
 	}
 
-	a.aiTypes[id] = aiTypeWaiting
-	if _, ok := a.aiRendered[id]; !ok {
-		a.aiRendered[id] = ""
-	}
-	if _, ok := a.aiStreams[id]; !ok {
-		a.aiStreams[id] = ""
-	}
+	a.ensureStream(id, aiTypeWaiting)
 	a.aiCompleted[id] = false
 	a.ensureWaitingVerb(id)
 	a.renderAIStream(id)
@@ -1148,9 +1144,9 @@ func (a *App) applyTokenUsage(payload map[string]any) {
 // "started" event followed by a "completed" event with only an exit code
 // doesn't blank the command line from the previous render.
 func (a *App) setToolCallSummary(itemID string, s toolSummary, final bool) tea.Cmd {
-	a.aiTypes[itemID] = TranscriptTool
-	a.aiStreams[itemID] = ""
-	a.aiRendered[itemID] = ""
+	stream := a.ensureStream(itemID, TranscriptTool)
+	stream.ReplaceBuffer("")
+	stream.SetRendered("")
 	a.aiCompleted[itemID] = final
 	if s.Title != "" {
 		a.aiToolTitle[itemID] = s.Title
@@ -1171,35 +1167,26 @@ func (a *App) setToolCallSummary(itemID string, s toolSummary, final bool) tea.C
 }
 
 func (a *App) upsertAIStream(itemID string, label TranscriptKind, delta string, completed bool) tea.Cmd {
-	a.aiTypes[itemID] = label
+	s := a.ensureStream(itemID, label)
 	if completed {
 		finalText := sanitizeHistoryMessage(delta)
 		if finalText != "" {
-			a.aiStreams[itemID] = finalText
-		} else if _, ok := a.aiStreams[itemID]; !ok {
-			a.aiStreams[itemID] = ""
+			s.ReplaceBuffer(finalText)
 		}
-	} else if strings.TrimSpace(delta) == "" {
-		if _, ok := a.aiStreams[itemID]; !ok {
-			a.aiStreams[itemID] = ""
-		}
-	} else {
+	} else if strings.TrimSpace(delta) != "" {
 		cleanDelta := sanitizeStreamDelta(delta)
 		if cleanDelta != "" {
-			a.aiStreams[itemID] = a.aiStreams[itemID] + cleanDelta
+			s.AppendDelta(cleanDelta)
 		}
 	}
 	if completed {
 		a.aiCompleted[itemID] = true
 	}
-	if _, ok := a.aiRendered[itemID]; !ok {
-		a.aiRendered[itemID] = ""
-	}
-	if !a.aiTicking[itemID] && a.aiRendered[itemID] == "" && a.aiStreams[itemID] != "" {
+	if !a.aiTicking[itemID] && s.Rendered() == "" && s.Buffer() != "" {
 		a.advanceAIStream(itemID)
 	}
 	a.renderAIStream(itemID)
-	if a.aiRendered[itemID] == a.aiStreams[itemID] {
+	if s.Rendered() == s.Buffer() {
 		if a.aiCompleted[itemID] {
 			a.finalizeAIStream(itemID)
 		}
@@ -1213,15 +1200,16 @@ func (a *App) upsertAIStream(itemID string, label TranscriptKind, delta string, 
 }
 
 func (a *App) handleAITick(itemID string) tea.Cmd {
-	if _, ok := a.aiTypes[itemID]; !ok {
+	s := a.stream(itemID)
+	if s == nil {
 		return nil
 	}
 	a.aiTicking[itemID] = false
-	if a.aiRendered[itemID] != a.aiStreams[itemID] {
+	if s.Rendered() != s.Buffer() {
 		a.advanceAIStream(itemID)
 		a.renderAIStream(itemID)
 	}
-	if a.aiRendered[itemID] == a.aiStreams[itemID] {
+	if s.Rendered() == s.Buffer() {
 		if a.isWaitingForAI(itemID) {
 			a.ensureWaitingVerb(itemID)
 			a.advanceWaitingFrame(itemID)
@@ -1245,27 +1233,32 @@ func (a *App) scheduleAITick(itemID string) tea.Cmd {
 }
 
 func (a *App) advanceAIStream(itemID string) {
-	target := []rune(a.aiStreams[itemID])
-	current := []rune(a.aiRendered[itemID])
+	s := a.stream(itemID)
+	if s == nil {
+		return
+	}
+	target := []rune(s.Buffer())
+	current := []rune(s.Rendered())
 	if len(current) >= len(target) {
-		a.aiRendered[itemID] = string(target)
+		s.SetRendered(string(target))
 		return
 	}
 	next := len(current) + aiRunesPerTick
 	if next > len(target) {
 		next = len(target)
 	}
-	a.aiRendered[itemID] = string(target[:next])
+	s.SetRendered(string(target[:next]))
 }
 
 func (a *App) renderAIStream(itemID string) {
-	label, ok := a.aiTypes[itemID]
-	if !ok {
+	s := a.stream(itemID)
+	if s == nil {
 		return
 	}
-	buf := a.aiRendered[itemID]
-	completed := a.aiCompleted[itemID] && a.aiRendered[itemID] == a.aiStreams[itemID]
-	item := TranscriptItem{ID: itemID, Kind: label, Text: buf, Final: completed}
+	label := s.Label()
+	caughtUp := s.Rendered() == s.Buffer()
+	completed := a.aiCompleted[itemID] && caughtUp
+	item := TranscriptItem{ID: itemID, Kind: label, Text: s.Rendered(), Final: completed}
 	if label == TranscriptTool {
 		item.Title = a.aiToolTitle[itemID]
 		item.Detail = a.aiToolDetail[itemID]
@@ -1274,7 +1267,7 @@ func (a *App) renderAIStream(itemID string) {
 	if label == aiTypeWaiting && !completed {
 		item.Status = a.waitingStatus(itemID)
 	}
-	if label == aiTypeResponse && !completed && a.aiRendered[itemID] == a.aiStreams[itemID] {
+	if label == aiTypeResponse && !completed && caughtUp {
 		item.Status = a.waitingStatus(itemID)
 	}
 	focus := a.shouldFollowHistory(itemID)
@@ -1287,11 +1280,12 @@ func (a *App) renderAIStream(itemID string) {
 }
 
 func (a *App) finalizeAIStream(itemID string) {
-	label, ok := a.aiTypes[itemID]
-	if !ok {
+	s := a.stream(itemID)
+	if s == nil {
 		return
 	}
-	final := TranscriptItem{ID: itemID, Kind: label, Text: a.aiRendered[itemID], Final: true}
+	label := s.Label()
+	final := TranscriptItem{ID: itemID, Kind: label, Text: s.Rendered(), Final: true}
 	if label == TranscriptTool {
 		final.Title = a.aiToolTitle[itemID]
 		final.Detail = a.aiToolDetail[itemID]
@@ -1301,9 +1295,9 @@ func (a *App) finalizeAIStream(itemID string) {
 	if idx, ok := a.aiIndexes[itemID]; ok {
 		a.history.UpdateItemAt(idx, final, focus)
 	}
+	delete(a.streams, itemID)
 	delete(a.aiVerbIdx, itemID)
 	delete(a.aiWaitFrames, itemID)
-	delete(a.aiTypes, itemID)
 	delete(a.aiCompleted, itemID)
 	delete(a.aiTicking, itemID)
 	delete(a.aiToolTitle, itemID)
@@ -1377,13 +1371,7 @@ func (a *App) startAIThinking(turnID string) tea.Cmd {
 	}
 	a.turnPrimed[turnID] = struct{}{}
 	a.aiTurnPlaceholders[turnID] = itemID
-	a.aiTypes[itemID] = aiTypeWaiting
-	if _, ok := a.aiRendered[itemID]; !ok {
-		a.aiRendered[itemID] = ""
-	}
-	if _, ok := a.aiStreams[itemID]; !ok {
-		a.aiStreams[itemID] = ""
-	}
+	a.ensureStream(itemID, aiTypeWaiting)
 	a.ensureWaitingVerb(itemID)
 	a.renderAIStream(itemID)
 	if a.aiTicking[itemID] {
@@ -1402,13 +1390,9 @@ func (a *App) adoptThinkingPlaceholder(turnID, itemID string) {
 		a.aiIndexes[itemID] = idx
 		delete(a.aiIndexes, placeholderID)
 	}
-	if rendered, ok := a.aiRendered[placeholderID]; ok {
-		a.aiRendered[itemID] = rendered
-		delete(a.aiRendered, placeholderID)
-	}
-	if stream, ok := a.aiStreams[placeholderID]; ok {
-		a.aiStreams[itemID] = stream
-		delete(a.aiStreams, placeholderID)
+	if s, ok := a.streams[placeholderID]; ok {
+		a.streams[itemID] = s
+		delete(a.streams, placeholderID)
 	}
 	if _, ok := a.aiTicking[placeholderID]; ok {
 		a.aiTicking[itemID] = false
@@ -1422,13 +1406,16 @@ func (a *App) adoptThinkingPlaceholder(turnID, itemID string) {
 		a.aiWaitFrames[itemID] = waitFrames
 		delete(a.aiWaitFrames, placeholderID)
 	}
-	delete(a.aiTypes, placeholderID)
 	delete(a.aiCompleted, placeholderID)
 	delete(a.aiTurnPlaceholders, turnID)
 }
 
 func (a *App) isWaitingForAI(itemID string) bool {
-	return a.aiTypes[itemID] == aiTypeWaiting && a.aiStreams[itemID] == "" && !a.aiCompleted[itemID]
+	s := a.stream(itemID)
+	if s == nil {
+		return false
+	}
+	return s.Label() == aiTypeWaiting && s.Buffer() == "" && !a.aiCompleted[itemID]
 }
 
 func sanitizeText(s string) string {

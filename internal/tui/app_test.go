@@ -120,7 +120,11 @@ func TestApproveUnsupportedKindDoesNotCallRPC(t *testing.T) {
 }
 
 func drainAIStream(app *App, itemID string) {
-	for app.aiTicking[itemID] || app.aiRendered[itemID] != app.aiStreams[itemID] {
+	for {
+		s := app.stream(itemID)
+		if !app.aiTicking[itemID] && (s == nil || s.Rendered() == s.Buffer()) {
+			return
+		}
 		_ = app.handleAITick(itemID)
 	}
 }
@@ -298,20 +302,24 @@ func TestUpsertAIStreamRevealsTextProgressively(t *testing.T) {
 
 	app.upsertAIStream("item-1", TranscriptAssistant, "abcdef", false)
 
-	if got := app.aiRendered["item-1"]; got == app.aiStreams["item-1"] {
-		t.Fatalf("expected rendered text to lag behind full stream, got %q", got)
+	s := app.stream("item-1")
+	if s == nil {
+		t.Fatal("expected stream to exist after upsert")
+	}
+	if s.Rendered() == s.Buffer() {
+		t.Fatalf("expected rendered text to lag behind full stream, got %q", s.Rendered())
 	}
 	drainAIStream(app, "item-1")
-	if got := app.aiRendered["item-1"]; got != "abcdef" {
+	if got := app.stream("item-1").Rendered(); got != "abcdef" {
 		t.Fatalf("expected full rendered text after ticks, got %q", got)
 	}
 }
 
 func TestRenderAIStreamShowsWaitingStatusWhenCaughtUp(t *testing.T) {
 	app := NewApp()
-	app.aiTypes["item-1"] = TranscriptAssistant
-	app.aiStreams["item-1"] = "hello"
-	app.aiRendered["item-1"] = "hello"
+	s := app.ensureStream("item-1", TranscriptAssistant)
+	s.ReplaceBuffer("hello")
+	s.SetRendered("hello")
 
 	app.renderAIStream("item-1")
 
@@ -605,7 +613,7 @@ func TestHandleCodexEventMarksFailedCommand(t *testing.T) {
 	if !got.Final {
 		t.Fatalf("expected failed command item to be final")
 	}
-	if _, ok := app.aiTypes["cmd-3"]; ok {
-		t.Fatalf("expected aiTypes cleared after finalize")
+	if app.stream("cmd-3") != nil {
+		t.Fatalf("expected stream cleared after finalize")
 	}
 }
