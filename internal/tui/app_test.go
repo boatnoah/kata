@@ -122,7 +122,10 @@ func TestApproveUnsupportedKindDoesNotCallRPC(t *testing.T) {
 func drainAIStream(app *App, itemID string) {
 	for {
 		s := app.stream(itemID)
-		if !app.aiTicking[itemID] && (s == nil || s.Rendered() == s.Buffer()) {
+		if s == nil {
+			return
+		}
+		if !s.IsTicking() && s.Rendered() == s.Buffer() {
 			return
 		}
 		_ = app.handleAITick(itemID)

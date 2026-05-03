@@ -45,10 +45,7 @@ type App struct {
 	ai                 *AIManager
 	streams            map[string]*AIStream
 	aiIndexes          map[string]int
-	aiVerbIdx          map[string]int
-	aiWaitFrames       map[string]int
 	aiCompleted        map[string]bool
-	aiTicking          map[string]bool
 	aiTurnPlaceholders map[string]string
 	// turnPrimed records turns where we already created the "thinking" row
 	// (from turn/started or recovered on the first streamed event). Cleared on
@@ -294,10 +291,7 @@ func NewApp() *App {
 		ai:                 newAIManager(),
 		streams:            make(map[string]*AIStream),
 		aiIndexes:          make(map[string]int),
-		aiVerbIdx:          make(map[string]int),
-		aiWaitFrames:       make(map[string]int),
 		aiCompleted:        make(map[string]bool),
-		aiTicking:          make(map[string]bool),
 		aiTurnPlaceholders: make(map[string]string),
 		turnPrimed:         make(map[string]struct{}),
 		aiToolTitle:        make(map[string]string),
@@ -996,10 +990,7 @@ func mergeTeaCmd(a, b tea.Cmd) tea.Cmd {
 
 func (a *App) teardownAIStreamKeys(itemID string) {
 	delete(a.streams, itemID)
-	delete(a.aiVerbIdx, itemID)
-	delete(a.aiWaitFrames, itemID)
 	delete(a.aiCompleted, itemID)
-	delete(a.aiTicking, itemID)
 	delete(a.aiToolTitle, itemID)
 	delete(a.aiToolDetail, itemID)
 	delete(a.aiToolState, itemID)
@@ -1062,23 +1053,17 @@ func (a *App) migrateAIStreamKeys(from, to string) {
 		a.aiIndexes[to] = idx
 	}
 	if s, ok := a.streams[from]; ok {
+		// Reset ticking on migrate: any previously-scheduled tea.Tick fires
+		// against the old id and will find no stream, so the migrated stream
+		// has no live tick scheduled.
+		s.SetTicking(false)
 		a.streams[to] = s
 		delete(a.streams, from)
-	}
-	if v, ok := a.aiVerbIdx[from]; ok {
-		a.aiVerbIdx[to] = v
-		delete(a.aiVerbIdx, from)
-	}
-	if v, ok := a.aiWaitFrames[from]; ok {
-		a.aiWaitFrames[to] = v
-		delete(a.aiWaitFrames, from)
 	}
 	if v, ok := a.aiCompleted[from]; ok {
 		a.aiCompleted[to] = v
 		delete(a.aiCompleted, from)
 	}
-	delete(a.aiTicking, from)
-	a.aiTicking[to] = false
 	if v, ok := a.aiToolTitle[from]; ok {
 		a.aiToolTitle[to] = v
 		delete(a.aiToolTitle, from)
@@ -1098,25 +1083,25 @@ func (a *App) migrateAIStreamKeys(from, to string) {
 func (a *App) beginOutboundWaitSync() tea.Cmd {
 	id := localOutboundPendingID
 	if _, exists := a.aiIndexes[id]; exists {
-		delete(a.aiVerbIdx, id)
-		delete(a.aiWaitFrames, id)
-		a.ensureWaitingVerb(id)
+		s := a.stream(id)
+		s.ResetWaiting()
+		s.EnsureWaitingVerb()
 		a.renderAIStream(id)
-		if a.aiTicking[id] {
+		if s.IsTicking() {
 			return nil
 		}
-		a.aiTicking[id] = true
+		s.SetTicking(true)
 		return a.scheduleAITick(id)
 	}
 
-	a.ensureStream(id, aiTypeWaiting)
+	s := a.ensureStream(id, aiTypeWaiting)
 	a.aiCompleted[id] = false
-	a.ensureWaitingVerb(id)
+	s.EnsureWaitingVerb()
 	a.renderAIStream(id)
-	if a.aiTicking[id] {
+	if s.IsTicking() {
 		return nil
 	}
-	a.aiTicking[id] = true
+	s.SetTicking(true)
 	return a.scheduleAITick(id)
 }
 
@@ -1182,7 +1167,7 @@ func (a *App) upsertAIStream(itemID string, label TranscriptKind, delta string, 
 	if completed {
 		a.aiCompleted[itemID] = true
 	}
-	if !a.aiTicking[itemID] && s.Rendered() == "" && s.Buffer() != "" {
+	if !s.IsTicking() && s.Rendered() == "" && s.Buffer() != "" {
 		a.advanceAIStream(itemID)
 	}
 	a.renderAIStream(itemID)
@@ -1192,10 +1177,10 @@ func (a *App) upsertAIStream(itemID string, label TranscriptKind, delta string, 
 		}
 		return nil
 	}
-	if a.aiTicking[itemID] {
+	if s.IsTicking() {
 		return nil
 	}
-	a.aiTicking[itemID] = true
+	s.SetTicking(true)
 	return a.scheduleAITick(itemID)
 }
 
@@ -1204,17 +1189,17 @@ func (a *App) handleAITick(itemID string) tea.Cmd {
 	if s == nil {
 		return nil
 	}
-	a.aiTicking[itemID] = false
+	s.SetTicking(false)
 	if s.Rendered() != s.Buffer() {
 		a.advanceAIStream(itemID)
 		a.renderAIStream(itemID)
 	}
 	if s.Rendered() == s.Buffer() {
 		if a.isWaitingForAI(itemID) {
-			a.ensureWaitingVerb(itemID)
-			a.advanceWaitingFrame(itemID)
+			s.EnsureWaitingVerb()
+			s.AdvanceWaitingFrame()
 			a.renderAIStream(itemID)
-			a.aiTicking[itemID] = true
+			s.SetTicking(true)
 			return a.scheduleAITick(itemID)
 		}
 		if a.aiCompleted[itemID] {
@@ -1222,7 +1207,7 @@ func (a *App) handleAITick(itemID string) tea.Cmd {
 		}
 		return nil
 	}
-	a.aiTicking[itemID] = true
+	s.SetTicking(true)
 	return a.scheduleAITick(itemID)
 }
 
@@ -1265,10 +1250,10 @@ func (a *App) renderAIStream(itemID string) {
 		item.Tool = a.aiToolState[itemID]
 	}
 	if label == aiTypeWaiting && !completed {
-		item.Status = a.waitingStatus(itemID)
+		item.Status = s.WaitingStatus()
 	}
 	if label == aiTypeResponse && !completed && caughtUp {
-		item.Status = a.waitingStatus(itemID)
+		item.Status = s.WaitingStatus()
 	}
 	focus := a.shouldFollowHistory(itemID)
 	if idx, ok := a.aiIndexes[itemID]; ok {
@@ -1296,10 +1281,7 @@ func (a *App) finalizeAIStream(itemID string) {
 		a.history.UpdateItemAt(idx, final, focus)
 	}
 	delete(a.streams, itemID)
-	delete(a.aiVerbIdx, itemID)
-	delete(a.aiWaitFrames, itemID)
 	delete(a.aiCompleted, itemID)
-	delete(a.aiTicking, itemID)
 	delete(a.aiToolTitle, itemID)
 	delete(a.aiToolDetail, itemID)
 	delete(a.aiToolState, itemID)
@@ -1307,42 +1289,6 @@ func (a *App) finalizeAIStream(itemID string) {
 
 func (a *App) shouldFollowHistory(_ string) bool {
 	return true
-}
-
-func (a *App) waitingStatus(itemID string) string {
-	return a.currentVerb(itemID) + " " + a.currentDots(itemID)
-}
-
-func (a *App) currentVerb(itemID string) string {
-	if len(spinnerVerbs) == 0 {
-		return "Thinking"
-	}
-	idx := a.aiVerbIdx[itemID] % len(spinnerVerbs)
-	return spinnerVerbs[idx]
-}
-
-func (a *App) currentDots(itemID string) string {
-	if len(spinnerDots) == 0 {
-		return "..."
-	}
-	frame := a.aiWaitFrames[itemID]
-	idx := (frame / 6) % len(spinnerDots)
-	return spinnerDots[idx]
-}
-
-func (a *App) advanceWaitingFrame(itemID string) {
-	frame := a.aiWaitFrames[itemID] + 1
-	a.aiWaitFrames[itemID] = frame
-}
-
-func (a *App) ensureWaitingVerb(itemID string) {
-	if len(spinnerVerbs) == 0 {
-		return
-	}
-	if _, ok := a.aiVerbIdx[itemID]; ok {
-		return
-	}
-	a.aiVerbIdx[itemID] = rand.IntN(len(spinnerVerbs))
 }
 
 func (a *App) startAIThinking(turnID string) tea.Cmd {
@@ -1359,10 +1305,11 @@ func (a *App) startAIThinking(turnID string) tea.Cmd {
 		a.history.UpdateItemAt(idx, it, true)
 		a.turnPrimed[turnID] = struct{}{}
 		a.renderAIStream(itemID)
-		if a.aiTicking[itemID] {
+		s := a.stream(itemID)
+		if s.IsTicking() {
 			return nil
 		}
-		a.aiTicking[itemID] = true
+		s.SetTicking(true)
 		return a.scheduleAITick(itemID)
 	}
 
@@ -1371,13 +1318,13 @@ func (a *App) startAIThinking(turnID string) tea.Cmd {
 	}
 	a.turnPrimed[turnID] = struct{}{}
 	a.aiTurnPlaceholders[turnID] = itemID
-	a.ensureStream(itemID, aiTypeWaiting)
-	a.ensureWaitingVerb(itemID)
+	s := a.ensureStream(itemID, aiTypeWaiting)
+	s.EnsureWaitingVerb()
 	a.renderAIStream(itemID)
-	if a.aiTicking[itemID] {
+	if s.IsTicking() {
 		return nil
 	}
-	a.aiTicking[itemID] = true
+	s.SetTicking(true)
 	return a.scheduleAITick(itemID)
 }
 
@@ -1391,20 +1338,12 @@ func (a *App) adoptThinkingPlaceholder(turnID, itemID string) {
 		delete(a.aiIndexes, placeholderID)
 	}
 	if s, ok := a.streams[placeholderID]; ok {
+		// Reset ticking on adopt: any tea.Tick scheduled with the placeholder
+		// id will fire against an absent stream after the rename, so the new
+		// id has no live tick scheduled until we reschedule one.
+		s.SetTicking(false)
 		a.streams[itemID] = s
 		delete(a.streams, placeholderID)
-	}
-	if _, ok := a.aiTicking[placeholderID]; ok {
-		a.aiTicking[itemID] = false
-		delete(a.aiTicking, placeholderID)
-	}
-	if verbIdx, ok := a.aiVerbIdx[placeholderID]; ok {
-		a.aiVerbIdx[itemID] = verbIdx
-		delete(a.aiVerbIdx, placeholderID)
-	}
-	if waitFrames, ok := a.aiWaitFrames[placeholderID]; ok {
-		a.aiWaitFrames[itemID] = waitFrames
-		delete(a.aiWaitFrames, placeholderID)
 	}
 	delete(a.aiCompleted, placeholderID)
 	delete(a.aiTurnPlaceholders, turnID)
