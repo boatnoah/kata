@@ -46,3 +46,63 @@ func TestAIStream_SetLabelFlips(t *testing.T) {
 		t.Fatalf("Label() after SetLabel = %q, want %q", s.Label(), TranscriptAssistant)
 	}
 }
+
+func TestAIStream_TickingToggle(t *testing.T) {
+	s := newAIStream(TranscriptAssistant)
+	if s.IsTicking() {
+		t.Fatalf("new stream should not be ticking")
+	}
+	s.SetTicking(true)
+	if !s.IsTicking() {
+		t.Fatalf("expected ticking after SetTicking(true)")
+	}
+	s.SetTicking(false)
+	if s.IsTicking() {
+		t.Fatalf("expected !ticking after SetTicking(false)")
+	}
+}
+
+func TestAIStream_EnsureWaitingVerbIdempotent(t *testing.T) {
+	s := newAIStream(TranscriptThinking)
+	s.EnsureWaitingVerb()
+	first := s.CurrentVerb()
+	for i := 0; i < 10; i++ {
+		s.EnsureWaitingVerb()
+		if got := s.CurrentVerb(); got != first {
+			t.Fatalf("EnsureWaitingVerb should be idempotent, iter %d got %q want %q", i, got, first)
+		}
+	}
+}
+
+func TestAIStream_AdvanceWaitingFrameCyclesDots(t *testing.T) {
+	s := newAIStream(TranscriptThinking)
+	dotsAt := func() string { return s.CurrentDots() }
+	first := dotsAt()
+	// Dots cycle every 6 frames; advancing 6 must change the dot string.
+	for i := 0; i < 6; i++ {
+		s.AdvanceWaitingFrame()
+	}
+	if dotsAt() == first {
+		t.Fatalf("expected dots to cycle after 6 advances, still %q", first)
+	}
+}
+
+func TestAIStream_ResetWaitingClearsVerbAndFrames(t *testing.T) {
+	s := newAIStream(TranscriptThinking)
+	s.EnsureWaitingVerb()
+	for i := 0; i < 5; i++ {
+		s.AdvanceWaitingFrame()
+	}
+	s.ResetWaiting()
+	if s.CurrentDots() != spinnerDots[0] {
+		t.Fatalf("ResetWaiting should reset frames; got dots %q want %q", s.CurrentDots(), spinnerDots[0])
+	}
+	// After reset, EnsureWaitingVerb should be allowed to pick again.
+	s.EnsureWaitingVerb()
+	// We can't assert a specific verb (random pick), only that calling
+	// EnsureWaitingVerb again after reset doesn't panic and yields a
+	// well-formed status.
+	if s.WaitingStatus() == "" {
+		t.Fatalf("WaitingStatus() should not be empty after reseed")
+	}
+}
