@@ -36,6 +36,58 @@ func TestAIStream_SetRenderedWriteback(t *testing.T) {
 	}
 }
 
+func TestAIStream_AdvanceEmptyBufferNoOp(t *testing.T) {
+	s := newAIStream(TranscriptAssistant)
+	s.Advance(3)
+	if s.Rendered() != "" {
+		t.Fatalf("Advance on empty buffer should leave rendered empty, got %q", s.Rendered())
+	}
+}
+
+func TestAIStream_AdvanceRevealsRunesPerTick(t *testing.T) {
+	s := newAIStream(TranscriptAssistant)
+	s.AppendDelta("abcdefghij")
+	s.Advance(3)
+	if got, want := s.Rendered(), "abc"; got != want {
+		t.Fatalf("after Advance(3), Rendered() = %q, want %q", got, want)
+	}
+	s.Advance(4)
+	if got, want := s.Rendered(), "abcdefg"; got != want {
+		t.Fatalf("after Advance(4), Rendered() = %q, want %q", got, want)
+	}
+}
+
+func TestAIStream_AdvanceLocksInAtCompletion(t *testing.T) {
+	s := newAIStream(TranscriptAssistant)
+	s.AppendDelta("abcde")
+	// Request more than the buffer holds.
+	s.Advance(99)
+	if got, want := s.Rendered(), "abcde"; got != want {
+		t.Fatalf("Advance past buffer should lock in full text, got %q want %q", got, want)
+	}
+}
+
+func TestAIStream_AdvanceIdempotentPastCompletion(t *testing.T) {
+	s := newAIStream(TranscriptAssistant)
+	s.AppendDelta("xyz")
+	s.Advance(3)
+	s.Advance(3)
+	s.Advance(99)
+	if got, want := s.Rendered(), "xyz"; got != want {
+		t.Fatalf("Advance after completion should be idempotent, got %q want %q", got, want)
+	}
+}
+
+func TestAIStream_AdvanceIsRuneSafe(t *testing.T) {
+	// Multi-byte runes should advance by codepoint, not byte.
+	s := newAIStream(TranscriptAssistant)
+	s.AppendDelta("héllo")
+	s.Advance(2)
+	if got, want := s.Rendered(), "hé"; got != want {
+		t.Fatalf("Advance(2) on multi-byte buffer = %q, want %q", got, want)
+	}
+}
+
 func TestAIStream_SetLabelFlips(t *testing.T) {
 	s := newAIStream(TranscriptThinking)
 	if s.Label() != TranscriptThinking {

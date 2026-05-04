@@ -1168,7 +1168,7 @@ func (a *App) upsertAIStream(itemID string, label TranscriptKind, delta string, 
 		a.aiCompleted[itemID] = true
 	}
 	if !s.IsTicking() && s.Rendered() == "" && s.Buffer() != "" {
-		a.advanceAIStream(itemID)
+		s.Advance(aiRunesPerTick)
 	}
 	a.renderAIStream(itemID)
 	if s.Rendered() == s.Buffer() {
@@ -1191,7 +1191,7 @@ func (a *App) handleAITick(itemID string) tea.Cmd {
 	}
 	s.SetTicking(false)
 	if s.Rendered() != s.Buffer() {
-		a.advanceAIStream(itemID)
+		s.Advance(aiRunesPerTick)
 		a.renderAIStream(itemID)
 	}
 	if s.Rendered() == s.Buffer() {
@@ -1215,24 +1215,6 @@ func (a *App) scheduleAITick(itemID string) tea.Cmd {
 	return tea.Tick(aiTypeInterval, func(time.Time) tea.Msg {
 		return aiTickMsg{itemID: itemID}
 	})
-}
-
-func (a *App) advanceAIStream(itemID string) {
-	s := a.stream(itemID)
-	if s == nil {
-		return
-	}
-	target := []rune(s.Buffer())
-	current := []rune(s.Rendered())
-	if len(current) >= len(target) {
-		s.SetRendered(string(target))
-		return
-	}
-	next := len(current) + aiRunesPerTick
-	if next > len(target) {
-		next = len(target)
-	}
-	s.SetRendered(string(target[:next]))
 }
 
 func (a *App) renderAIStream(itemID string) {

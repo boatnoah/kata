@@ -36,7 +36,26 @@ func (s *AIStream) ReplaceBuffer(text string) { s.buffer = text }
 
 func (s *AIStream) Rendered() string { return s.rendered }
 
+// SetRendered overwrites the rendered substring. Used by setToolCallSummary
+// to clear prior text on a tool transition; slated for removal in slice 04
+// when that path gets restructured.
 func (s *AIStream) SetRendered(text string) { s.rendered = text }
+
+// Advance reveals up to runesPerTick more runes from the buffer into the
+// rendered substring. Idempotent once rendered has caught up to the buffer.
+func (s *AIStream) Advance(runesPerTick int) {
+	target := []rune(s.buffer)
+	current := []rune(s.rendered)
+	if len(current) >= len(target) {
+		s.rendered = string(target)
+		return
+	}
+	next := len(current) + runesPerTick
+	if next > len(target) {
+		next = len(target)
+	}
+	s.rendered = string(target[:next])
+}
 
 func (s *AIStream) IsTicking() bool { return s.ticking }
 
