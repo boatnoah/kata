@@ -45,15 +45,11 @@ type App struct {
 	ai                 *AIManager
 	streams            map[string]*AIStream
 	aiIndexes          map[string]int
-	aiCompleted        map[string]bool
 	aiTurnPlaceholders map[string]string
 	// turnPrimed records turns where we already created the "thinking" row
 	// (from turn/started or recovered on the first streamed event). Cleared on
 	// turn/completed so a burst of Codex notifications cannot skip priming.
-	turnPrimed   map[string]struct{}
-	aiToolTitle  map[string]string
-	aiToolDetail map[string]string
-	aiToolState  map[string]ToolState
+	turnPrimed map[string]struct{}
 
 	// Pending server→client JSON-RPC approval (at most one). Filled from
 	// agent.EventApprovalRequired; cleared after :approve / :deny or superseded.
@@ -291,12 +287,8 @@ func NewApp() *App {
 		ai:                 newAIManager(),
 		streams:            make(map[string]*AIStream),
 		aiIndexes:          make(map[string]int),
-		aiCompleted:        make(map[string]bool),
 		aiTurnPlaceholders: make(map[string]string),
 		turnPrimed:         make(map[string]struct{}),
-		aiToolTitle:        make(map[string]string),
-		aiToolDetail:       make(map[string]string),
-		aiToolState:        make(map[string]ToolState),
 	}
 	a.provider = a.ai.Provider()
 	a.model = a.ai.Model()
@@ -988,14 +980,6 @@ func mergeTeaCmd(a, b tea.Cmd) tea.Cmd {
 	}
 }
 
-func (a *App) teardownAIStreamKeys(itemID string) {
-	delete(a.streams, itemID)
-	delete(a.aiCompleted, itemID)
-	delete(a.aiToolTitle, itemID)
-	delete(a.aiToolDetail, itemID)
-	delete(a.aiToolState, itemID)
-}
-
 // stream returns the AIStream for itemID, or nil if absent.
 func (a *App) stream(itemID string) *AIStream { return a.streams[itemID] }
 
@@ -1038,7 +1022,7 @@ func (a *App) abandonOutboundPending() {
 		return
 	}
 	delete(a.aiIndexes, localOutboundPendingID)
-	a.teardownAIStreamKeys(localOutboundPendingID)
+	delete(a.streams, localOutboundPendingID)
 	a.spliceHistoryRemove(idx)
 }
 
@@ -1060,22 +1044,6 @@ func (a *App) migrateAIStreamKeys(from, to string) {
 		a.streams[to] = s
 		delete(a.streams, from)
 	}
-	if v, ok := a.aiCompleted[from]; ok {
-		a.aiCompleted[to] = v
-		delete(a.aiCompleted, from)
-	}
-	if v, ok := a.aiToolTitle[from]; ok {
-		a.aiToolTitle[to] = v
-		delete(a.aiToolTitle, from)
-	}
-	if v, ok := a.aiToolDetail[from]; ok {
-		a.aiToolDetail[to] = v
-		delete(a.aiToolDetail, from)
-	}
-	if v, ok := a.aiToolState[from]; ok {
-		a.aiToolState[to] = v
-		delete(a.aiToolState, from)
-	}
 }
 
 // beginOutboundWaitSync runs in the same Update as :w — before sendToAI's
@@ -1095,7 +1063,6 @@ func (a *App) beginOutboundWaitSync() tea.Cmd {
 	}
 
 	s := a.ensureStream(id, aiTypeWaiting)
-	a.aiCompleted[id] = false
 	s.EnsureWaitingVerb()
 	a.renderAIStream(id)
 	if s.IsTicking() {
@@ -1128,22 +1095,11 @@ func (a *App) applyTokenUsage(payload map[string]any) {
 // Empty Title/Detail on the incoming summary preserve the prior value so a
 // "started" event followed by a "completed" event with only an exit code
 // doesn't blank the command line from the previous render.
-func (a *App) setToolCallSummary(itemID string, s toolSummary, final bool) tea.Cmd {
-	stream := a.ensureStream(itemID, TranscriptTool)
-	stream.ReplaceBuffer("")
-	stream.SetRendered("")
-	a.aiCompleted[itemID] = final
-	if s.Title != "" {
-		a.aiToolTitle[itemID] = s.Title
-	} else if _, ok := a.aiToolTitle[itemID]; !ok {
-		a.aiToolTitle[itemID] = ""
-	}
-	if s.Detail != "" {
-		a.aiToolDetail[itemID] = s.Detail
-	} else if _, ok := a.aiToolDetail[itemID]; !ok {
-		a.aiToolDetail[itemID] = ""
-	}
-	a.aiToolState[itemID] = s.State
+func (a *App) setToolCallSummary(itemID string, summary toolSummary, final bool) tea.Cmd {
+	s := a.ensureStream(itemID, TranscriptTool)
+	s.Reset()
+	s.SetCompleted(final)
+	s.UpdateTool(summary)
 	a.renderAIStream(itemID)
 	if final {
 		a.finalizeAIStream(itemID)
@@ -1154,25 +1110,19 @@ func (a *App) setToolCallSummary(itemID string, s toolSummary, final bool) tea.C
 func (a *App) upsertAIStream(itemID string, label TranscriptKind, delta string, completed bool) tea.Cmd {
 	s := a.ensureStream(itemID, label)
 	if completed {
-		finalText := sanitizeHistoryMessage(delta)
-		if finalText != "" {
-			s.ReplaceBuffer(finalText)
-		}
+		s.Complete(sanitizeHistoryMessage(delta))
 	} else if strings.TrimSpace(delta) != "" {
 		cleanDelta := sanitizeStreamDelta(delta)
 		if cleanDelta != "" {
 			s.AppendDelta(cleanDelta)
 		}
 	}
-	if completed {
-		a.aiCompleted[itemID] = true
-	}
 	if !s.IsTicking() && s.Rendered() == "" && s.Buffer() != "" {
 		s.Advance(aiRunesPerTick)
 	}
 	a.renderAIStream(itemID)
 	if s.Rendered() == s.Buffer() {
-		if a.aiCompleted[itemID] {
+		if s.IsCompleted() {
 			a.finalizeAIStream(itemID)
 		}
 		return nil
@@ -1202,7 +1152,7 @@ func (a *App) handleAITick(itemID string) tea.Cmd {
 			s.SetTicking(true)
 			return a.scheduleAITick(itemID)
 		}
-		if a.aiCompleted[itemID] {
+		if s.IsCompleted() {
 			a.finalizeAIStream(itemID)
 		}
 		return nil
@@ -1224,12 +1174,10 @@ func (a *App) renderAIStream(itemID string) {
 	}
 	label := s.Label()
 	caughtUp := s.Rendered() == s.Buffer()
-	completed := a.aiCompleted[itemID] && caughtUp
+	completed := s.IsCompleted() && caughtUp
 	item := TranscriptItem{ID: itemID, Kind: label, Text: s.Rendered(), Final: completed}
 	if label == TranscriptTool {
-		item.Title = a.aiToolTitle[itemID]
-		item.Detail = a.aiToolDetail[itemID]
-		item.Tool = a.aiToolState[itemID]
+		item.Title, item.Detail, item.Tool = s.Tool()
 	}
 	if label == aiTypeWaiting && !completed {
 		item.Status = s.WaitingStatus()
@@ -1254,19 +1202,13 @@ func (a *App) finalizeAIStream(itemID string) {
 	label := s.Label()
 	final := TranscriptItem{ID: itemID, Kind: label, Text: s.Rendered(), Final: true}
 	if label == TranscriptTool {
-		final.Title = a.aiToolTitle[itemID]
-		final.Detail = a.aiToolDetail[itemID]
-		final.Tool = a.aiToolState[itemID]
+		final.Title, final.Detail, final.Tool = s.Tool()
 	}
 	focus := a.shouldFollowHistory(itemID)
 	if idx, ok := a.aiIndexes[itemID]; ok {
 		a.history.UpdateItemAt(idx, final, focus)
 	}
 	delete(a.streams, itemID)
-	delete(a.aiCompleted, itemID)
-	delete(a.aiToolTitle, itemID)
-	delete(a.aiToolDetail, itemID)
-	delete(a.aiToolState, itemID)
 }
 
 func (a *App) shouldFollowHistory(_ string) bool {
@@ -1327,7 +1269,6 @@ func (a *App) adoptThinkingPlaceholder(turnID, itemID string) {
 		a.streams[itemID] = s
 		delete(a.streams, placeholderID)
 	}
-	delete(a.aiCompleted, placeholderID)
 	delete(a.aiTurnPlaceholders, turnID)
 }
 
@@ -1336,7 +1277,7 @@ func (a *App) isWaitingForAI(itemID string) bool {
 	if s == nil {
 		return false
 	}
-	return s.Label() == aiTypeWaiting && s.Buffer() == "" && !a.aiCompleted[itemID]
+	return s.Label() == aiTypeWaiting && s.Buffer() == "" && !s.IsCompleted()
 }
 
 func sanitizeText(s string) string {

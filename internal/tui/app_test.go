@@ -321,8 +321,8 @@ func TestUpsertAIStreamRevealsTextProgressively(t *testing.T) {
 func TestRenderAIStreamShowsWaitingStatusWhenCaughtUp(t *testing.T) {
 	app := NewApp()
 	s := app.ensureStream("item-1", TranscriptAssistant)
-	s.ReplaceBuffer("hello")
-	s.SetRendered("hello")
+	s.AppendDelta("hello")
+	s.Advance(len("hello"))
 
 	app.renderAIStream("item-1")
 

@@ -2,13 +2,11 @@ package tui
 
 import "math/rand/v2"
 
-// AIStream owns the per-item state for one in-flight AI stream: the kind
-// label, the raw delta buffer accumulated from the backend, the
-// progressively-revealed substring that the typing animation has caught up
-// to, and the animation state (rotating verb, dot frame counter, and the
-// "tick scheduled" flag). App holds a map[itemID]*AIStream and continues to
-// own history index, completion, and tool metadata for now; subsequent
-// slices migrate those onto AIStream.
+// AIStream owns the per-item state for one in-flight AI stream: kind label,
+// raw delta buffer, progressively-revealed substring, animation state
+// (rotating verb, dot frame counter, "tick scheduled" flag), completion
+// flag, and tool metadata. App holds a map[itemID]*AIStream; the only
+// per-itemID maps still on App are streams and aiIndexes (history index).
 type AIStream struct {
 	label    TranscriptKind
 	buffer   string
@@ -18,6 +16,12 @@ type AIStream struct {
 	verbSet    bool
 	waitFrames int
 	ticking    bool
+
+	completed bool
+
+	toolTitle  string
+	toolDetail string
+	toolState  ToolState
 }
 
 func newAIStream(label TranscriptKind) *AIStream {
@@ -32,14 +36,7 @@ func (s *AIStream) Buffer() string { return s.buffer }
 
 func (s *AIStream) AppendDelta(clean string) { s.buffer += clean }
 
-func (s *AIStream) ReplaceBuffer(text string) { s.buffer = text }
-
 func (s *AIStream) Rendered() string { return s.rendered }
-
-// SetRendered overwrites the rendered substring. Used by setToolCallSummary
-// to clear prior text on a tool transition; slated for removal in slice 04
-// when that path gets restructured.
-func (s *AIStream) SetRendered(text string) { s.rendered = text }
 
 // Advance reveals up to runesPerTick more runes from the buffer into the
 // rendered substring. Idempotent once rendered has caught up to the buffer.
@@ -55,6 +52,13 @@ func (s *AIStream) Advance(runesPerTick int) {
 		next = len(target)
 	}
 	s.rendered = string(target[:next])
+}
+
+// Reset clears buffer and rendered. Used on tool transitions where any
+// prior streamed text should be wiped before tool metadata fills in.
+func (s *AIStream) Reset() {
+	s.buffer = ""
+	s.rendered = ""
 }
 
 func (s *AIStream) IsTicking() bool { return s.ticking }
@@ -99,4 +103,38 @@ func (s *AIStream) ResetWaiting() {
 	s.verbIdx = 0
 	s.verbSet = false
 	s.waitFrames = 0
+}
+
+func (s *AIStream) IsCompleted() bool { return s.completed }
+
+func (s *AIStream) SetCompleted(c bool) { s.completed = c }
+
+// Complete marks the stream as completed. If finalText is non-empty, it
+// replaces the buffer with it; empty preserves accumulated text (some
+// completion events arrive without a final-text snapshot).
+func (s *AIStream) Complete(finalText string) {
+	if finalText != "" {
+		s.buffer = finalText
+	}
+	s.completed = true
+}
+
+// Tool returns the current tool-call metadata. Meaningful only when
+// Label() == TranscriptTool.
+func (s *AIStream) Tool() (title, detail string, state ToolState) {
+	return s.toolTitle, s.toolDetail, s.toolState
+}
+
+// UpdateTool merges the incoming summary into the stream's tool metadata.
+// Empty Title or Detail in the summary preserve the prior values so that
+// "started → completed" sequences with only state changes don't blank the
+// command line from the prior render.
+func (s *AIStream) UpdateTool(summary toolSummary) {
+	if summary.Title != "" {
+		s.toolTitle = summary.Title
+	}
+	if summary.Detail != "" {
+		s.toolDetail = summary.Detail
+	}
+	s.toolState = summary.State
 }
