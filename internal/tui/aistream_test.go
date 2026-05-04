@@ -15,24 +15,82 @@ func TestAIStream_AppendDeltaAccumulates(t *testing.T) {
 	}
 }
 
-func TestAIStream_ReplaceBufferOverwrites(t *testing.T) {
+func TestAIStream_CompleteWithFinalTextReplacesBuffer(t *testing.T) {
 	s := newAIStream(TranscriptAssistant)
 	s.AppendDelta("partial draft ")
-	s.ReplaceBuffer("final text from completion event")
+	s.Complete("final text from completion event")
 	if got, want := s.Buffer(), "final text from completion event"; got != want {
-		t.Fatalf("Buffer() after ReplaceBuffer = %q, want %q", got, want)
+		t.Fatalf("Buffer() after Complete(final) = %q, want %q", got, want)
+	}
+	if !s.IsCompleted() {
+		t.Fatalf("Complete() should set IsCompleted() true")
 	}
 }
 
-func TestAIStream_SetRenderedWriteback(t *testing.T) {
+func TestAIStream_CompleteEmptyTextPreservesBuffer(t *testing.T) {
 	s := newAIStream(TranscriptAssistant)
-	s.AppendDelta("abcdef")
-	s.SetRendered("abc")
-	if got, want := s.Rendered(), "abc"; got != want {
-		t.Fatalf("Rendered() = %q, want %q", got, want)
+	s.AppendDelta("accumulated streaming text")
+	s.Complete("")
+	if got, want := s.Buffer(), "accumulated streaming text"; got != want {
+		t.Fatalf("Complete(\"\") should preserve buffer; got %q want %q", got, want)
 	}
-	if s.Buffer() != "abcdef" {
-		t.Fatalf("Buffer() should be unchanged by SetRendered, got %q", s.Buffer())
+	if !s.IsCompleted() {
+		t.Fatalf("Complete(\"\") should still set IsCompleted() true")
+	}
+}
+
+func TestAIStream_CompletedToggle(t *testing.T) {
+	s := newAIStream(TranscriptAssistant)
+	if s.IsCompleted() {
+		t.Fatalf("new stream should not be completed")
+	}
+	s.SetCompleted(true)
+	if !s.IsCompleted() {
+		t.Fatalf("SetCompleted(true) should flip flag on")
+	}
+	s.SetCompleted(false)
+	if s.IsCompleted() {
+		t.Fatalf("SetCompleted(false) should flip flag off")
+	}
+}
+
+func TestAIStream_ResetClearsBufferAndRendered(t *testing.T) {
+	s := newAIStream(TranscriptTool)
+	s.AppendDelta("prior streamed text")
+	s.Advance(99)
+	s.Reset()
+	if s.Buffer() != "" {
+		t.Fatalf("Reset() should clear buffer, got %q", s.Buffer())
+	}
+	if s.Rendered() != "" {
+		t.Fatalf("Reset() should clear rendered, got %q", s.Rendered())
+	}
+}
+
+func TestAIStream_UpdateToolEmptyPreservesPrior(t *testing.T) {
+	s := newAIStream(TranscriptTool)
+	s.UpdateTool(toolSummary{Title: "Read", Detail: "go.mod", State: ToolPending})
+	// Subsequent update with empty title/detail should preserve prior.
+	s.UpdateTool(toolSummary{State: ToolOK})
+	title, detail, state := s.Tool()
+	if title != "Read" {
+		t.Fatalf("title should be preserved on empty UpdateTool; got %q", title)
+	}
+	if detail != "go.mod" {
+		t.Fatalf("detail should be preserved on empty UpdateTool; got %q", detail)
+	}
+	if state != ToolOK {
+		t.Fatalf("state should update; got %v want %v", state, ToolOK)
+	}
+}
+
+func TestAIStream_UpdateToolNonEmptyOverwrites(t *testing.T) {
+	s := newAIStream(TranscriptTool)
+	s.UpdateTool(toolSummary{Title: "Read", Detail: "go.mod", State: ToolPending})
+	s.UpdateTool(toolSummary{Title: "Read again", Detail: "main.go", State: ToolOK})
+	title, detail, state := s.Tool()
+	if title != "Read again" || detail != "main.go" || state != ToolOK {
+		t.Fatalf("UpdateTool with non-empty values should overwrite; got (%q, %q, %v)", title, detail, state)
 	}
 }
 
